@@ -1,0 +1,41 @@
+{
+  "name": "@warcommand/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "assets": "node scripts/copy-assets.mjs",
+    "predev": "node scripts/copy-assets.mjs",
+    "dev": "next dev -p 3210",
+    "prebuild": "node scripts/copy-assets.mjs",
+    "build": "next build",
+    "start": "next start -p 3210",
+    "typecheck": "tsc --noEmit --incremental false"
+  },
+  "dependencies": {
+    "@warcommand/ai-commander": "workspace:*",
+    "@warcommand/air-operations": "workspace:*",
+    "@warcommand/doctrine-engine": "workspace:*",
+    "@warcommand/land-operations": "workspace:*",
+    "@warcommand/mission-editor": "workspace:*",
+    "@warcommand/multi-domain-effects": "workspace:*",
+    "@warcommand/naval-operations": "workspace:*",
+    "@warcommand/replay-engine": "workspace:*",
+    "@warcommand/scenario-system": "workspace:*",
+    "@warcommand/simulation-core": "workspace:*",
+    "@warcommand/unit-database": "workspace:*",
+    "maplibre-gl": "^6.18.0",
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/topojson-client": "^3.1.5",
+    "typescript": "^7.0.2"
+  }
+}

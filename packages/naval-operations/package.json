@@ -1,0 +1,14 @@
+{
+  "name": "@warcommand/naval-operations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@warcommand/simulation-core": "workspace:*",
+    "@warcommand/air-operations": "workspace:*"
+  }
+}

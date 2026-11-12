@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+apps/web/public/vendor/
+apps/web/public/data/
+# Réglages personnels de Claude Code (autorisations locales)
+.claude/settings.local.json

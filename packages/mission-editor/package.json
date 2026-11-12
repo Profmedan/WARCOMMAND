@@ -1,0 +1,15 @@
+{
+  "name": "@warcommand/mission-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@warcommand/simulation-core": "workspace:*",
+    "@warcommand/unit-database": "workspace:*",
+    "@warcommand/doctrine-engine": "workspace:*",
+    "@warcommand/air-operations": "workspace:*",
+    "@warcommand/scenario-system": "workspace:*"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@warcommand/scenario-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@warcommand/simulation-core": "workspace:*",
+    "@warcommand/unit-database": "workspace:*",
+    "@warcommand/doctrine-engine": "workspace:*",
+    "@warcommand/air-operations": "workspace:*",
+    "@warcommand/ai-commander": "workspace:*",
+    "zod": "^4.6.7",
+    "@warcommand/land-operations": "workspace:*",
+    "@warcommand/naval-operations": "workspace:*",
+    "@warcommand/multi-domain-effects": "workspace:*"
+  }
+}
