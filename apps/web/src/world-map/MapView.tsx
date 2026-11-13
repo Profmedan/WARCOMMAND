@@ -1,7 +1,10 @@
 'use client';
 
 /**
- * Carte opérationnelle 2D (MapLibre GL JS).
+ * Carte opérationnelle (MapLibre GL JS) : vue 2D de travail, et vue 3D complémentaire sur le globe.
+ *
+ * En vue 3D, la Terre est une sphère, la caméra s'incline et tourne, et chaque mobile en vol est relié à
+ * sa projection au sol par une colonne à la hauteur de son altitude (exagérée pour rester lisible).
  *
  * Fond de carte embarqué Natural Earth (domaine public) : aucune tuile, aucune clé, aucun réseau.
  * Les lignes et surfaces sont des couches GeoJSON ; les symboles et étiquettes sont des éléments
@@ -12,7 +15,7 @@ import { Map as MlMap, Marker, setWorkerUrl, type GeoJSONSource, type StyleSpeci
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { feature } from 'topojson-client';
 import type { Feature, FeatureCollection, Geometry } from 'geojson';
-import type { Bounds, LatLon } from '@warcommand/simulation-core';
+import { bearingDeg, destination, type Bounds, type LatLon, type TerrainKind } from '@warcommand/simulation-core';
 import { formatLatLon } from '../user-interface/i18n';
 import type { MapScene, MapSymbol, Selection } from './scene';
 
@@ -24,6 +27,8 @@ export interface MapViewProps {
   /** Mode « pointage » : les clics traversent les symboles et sont remis à `onMapClick`. */
   picking: boolean;
   showGraticule: boolean;
+  /** Vue 3D : globe, caméra inclinée, altitudes en volume. */
+  view3d?: boolean;
   onMapClick?: (pos: LatLon) => void;
   onSelect?: (selection: Selection) => void;
   /** Appelé quand la vue se stabilise (déplacement, zoom) : emprise visible, centre, zoom. */
@@ -45,6 +50,53 @@ const BASE_STYLE: StyleSpecification = {
 };
 
 const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] };
+
+/** Les altitudes sont multipliées pour rester visibles à l'échelle d'un théâtre de plusieurs centaines de kilomètres. */
+export const ALTITUDE_EXAGGERATION = 12;
+/** Hauteur schématique des zones de terrain du scénario, en mètres : le jeu n'embarque aucun modèle d'altitude. */
+const RELIEF_HEIGHT_M: Record<TerrainKind, number> = { montagne: 1800, urbain: 300, foret: 250, marais: 40 };
+const RELIEF_COLOR = ['match', ['get', 'terrain'], 'montagne', '#8a7d68', 'urbain', '#9aa0a6', 'foret', '#3f6b4f', '#4f6f73'] as unknown as string;
+
+/** Carré centré sur `pos`, de demi-côté `halfKm`. */
+function squareRing(pos: LatLon, halfKm: number): [number, number][] {
+  const corners = [45, 135, 225, 315].map((bearing) => lngLat(destination(pos, bearing, halfKm * Math.SQRT2)));
+  return [...corners, corners[0]!];
+}
+
+/**
+ * Volumes de la vue 3D : colonnes d'altitude, rideaux des traces, zones de terrain.
+ * Les colonnes ont une largeur constante à l'écran : elle se recalcule donc avec le zoom.
+ */
+function volumeData(scene: MapScene, zoom: number): FeatureCollection {
+  const features: Feature[] = [];
+  const polygon = (ring: [number, number][], properties: Record<string, string | number>): Feature => ({ type: 'Feature', properties, geometry: { type: 'Polygon', coordinates: [ring] } });
+
+  for (const zone of scene.relief) {
+    features.push(polygon(zone.ring.map(lngLat), { kind: 'relief', terrain: zone.kind, b: 0, h: RELIEF_HEIGHT_M[zone.kind] * ALTITUDE_EXAGGERATION }));
+  }
+  for (const v of scene.volumes) {
+    if (v.altM <= 0) continue;
+    const kmPerPx = (40075 * Math.cos((v.pos.lat * Math.PI) / 180)) / (512 * 2 ** zoom);
+    const top = v.altM * ALTITUDE_EXAGGERATION;
+    const cap = Math.min(top, Math.max(4000, top * 0.07));
+    const side = v.side ?? 'NONE';
+    features.push(polygon(squareRing(v.pos, 1.2 * kmPerPx), { kind: 'column', side, b: 0, h: top - cap }));
+    features.push(polygon(squareRing(v.pos, 4 * kmPerPx), { kind: 'column', side, b: top - cap, h: top }));
+  }
+  for (const trail of scene.trails) {
+    for (let i = 1; i < trail.points.length; i++) {
+      const a = trail.points[i - 1]!;
+      const b = trail.points[i]!;
+      const altM = (a.altM + b.altM) / 2;
+      if (altM <= 0 || (a.lat === b.lat && a.lon === b.lon)) continue;
+      const kmPerPx = (40075 * Math.cos((a.lat * Math.PI) / 180)) / (512 * 2 ** zoom);
+      const bearing = bearingDeg(a, b);
+      const ring = [destination(a, bearing - 90, 0.6 * kmPerPx), destination(b, bearing - 90, 0.6 * kmPerPx), destination(b, bearing + 90, 0.6 * kmPerPx), destination(a, bearing + 90, 0.6 * kmPerPx)].map(lngLat);
+      features.push(polygon([...ring, ring[0]!], { kind: 'curtain', side: trail.side ?? 'NONE', b: 0, h: altM * ALTITUDE_EXAGGERATION }));
+    }
+  }
+  return { type: 'FeatureCollection', features };
+}
 
 function graticule(): FeatureCollection {
   const features: Feature[] = [];
@@ -98,6 +150,9 @@ function overlayData(scene: MapScene): FeatureCollection {
   for (const d of scene.dots) {
     features.push({ type: 'Feature', properties: { kind: d.kind, side: d.side ?? 'NONE' }, geometry: { type: 'Point', coordinates: lngLat(d.pos) } });
   }
+  for (const t of scene.trails) {
+    features.push({ type: 'Feature', properties: { kind: 'trail', side: t.side ?? 'NONE' }, geometry: { type: 'LineString', coordinates: t.points.map((p) => [p.lon, p.lat]) } });
+  }
   return { type: 'FeatureCollection', features };
 }
 
@@ -105,6 +160,7 @@ function addLayers(map: MlMap, land: FeatureCollection): void {
   map.addSource('graticule', { type: 'geojson', data: graticule() });
   map.addSource('land', { type: 'geojson', data: land });
   map.addSource('overlay', { type: 'geojson', data: EMPTY });
+  map.addSource('volumes', { type: 'geojson', data: EMPTY });
 
   map.addLayer({ id: 'graticule', type: 'line', source: 'graticule', paint: { 'line-color': '#ffffff', 'line-opacity': 0.06, 'line-width': 1 } });
   map.addLayer({ id: 'land', type: 'fill', source: 'land', paint: { 'fill-color': '#45605a' } });
@@ -121,6 +177,9 @@ function addLayers(map: MlMap, land: FeatureCollection): void {
   line('weapon-line', 'weapon', { 'line-color': SIDE_COLOR, 'line-width': 1.2, 'line-opacity': 0.75 });
   line('threat-line', 'threat', { 'line-color': SIDE_COLOR, 'line-width': 1.2, 'line-dasharray': [3, 3], 'line-opacity': 0.7 });
   line('uncertainty-line', 'uncertainty', { 'line-color': '#f2c14e', 'line-width': 1, 'line-dasharray': [1, 2], 'line-opacity': 0.7 });
+  line('terrain-line', 'terrain', { 'line-color': '#c9b48a', 'line-width': 1, 'line-dasharray': [2, 2], 'line-opacity': 0.6 });
+  line('footprint-line', 'footprint', { 'line-color': '#d6c6ff', 'line-width': 1.2, 'line-dasharray': [6, 3], 'line-opacity': 0.75 });
+  line('trail-line', 'trail', { 'line-color': SIDE_COLOR, 'line-width': 1.4, 'line-opacity': 0.5 });
   line('route-line', 'route', { 'line-color': SIDE_COLOR, 'line-width': 1.8, 'line-dasharray': [3, 2.5], 'line-opacity': 0.9 });
   line('task-line', 'task', { 'line-color': SIDE_COLOR, 'line-width': 1, 'line-opacity': 0.55 });
   line('shot-line', 'shot', { 'line-color': '#ffb347', 'line-width': 1.4, 'line-opacity': 0.9 });
@@ -134,6 +193,19 @@ function addLayers(map: MlMap, land: FeatureCollection): void {
     filter: kind('waypoint') as never,
     paint: { 'circle-radius': 5, 'circle-color': '#0c1826', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 },
   });
+
+  // Volumes de la vue 3D (vides en vue 2D).
+  const volume = (id: string, k: string, color: string, opacity: number) =>
+    map.addLayer({
+      id,
+      type: 'fill-extrusion',
+      source: 'volumes',
+      filter: kind(k) as never,
+      paint: { 'fill-extrusion-color': color, 'fill-extrusion-height': ['get', 'h'], 'fill-extrusion-base': ['get', 'b'], 'fill-extrusion-opacity': opacity } as never,
+    });
+  volume('relief-3d', 'relief', RELIEF_COLOR, 0.55);
+  volume('curtain-3d', 'curtain', SIDE_COLOR, 0.22);
+  volume('column-3d', 'column', SIDE_COLOR, 0.92);
 }
 
 const FRAMES: Record<MapSymbol['frame'], string> = {
@@ -168,7 +240,7 @@ interface Entry {
   signature: string;
 }
 
-export function MapView({ scene, view, fit, picking, showGraticule, onMapClick, onSelect, onViewChange }: MapViewProps) {
+export function MapView({ scene, view, fit, picking, showGraticule, view3d = false, onMapClick, onSelect, onViewChange }: MapViewProps) {
   const container = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
   const entries = useRef(new Map<string, Entry>());
@@ -179,6 +251,10 @@ export function MapView({ scene, view, fit, picking, showGraticule, onMapClick, 
   const [cursor, setCursor] = useState<LatLon | null>(null);
   const initialView = useRef(view);
   const initialFit = useRef(fit);
+  const sceneRef = useRef(scene);
+  const view3dRef = useRef(view3d);
+  sceneRef.current = scene;
+  view3dRef.current = view3d;
 
   handlers.current = { onMapClick, onSelect, onViewChange };
 
@@ -197,11 +273,14 @@ export function MapView({ scene, view, fit, picking, showGraticule, onMapClick, 
         minZoom: 1.5,
         maxZoom: 10,
         attributionControl: false,
-        dragRotate: false,
-        pitchWithRotate: false,
-        touchPitch: false,
+        maxPitch: 75,
         renderWorldCopies: true,
       });
+      // Vue 2D par défaut : ni rotation ni inclinaison. La vue 3D les rend.
+      map.dragRotate.disable();
+      map.touchPitch.disable();
+      map.touchZoomRotate.disableRotation();
+      map.keyboard.disableRotation();
     } catch (error) {
       setFailed(error instanceof Error ? error.message : String(error));
       return;
@@ -243,6 +322,11 @@ export function MapView({ scene, view, fit, picking, showGraticule, onMapClick, 
     };
     map.on('moveend', reportView);
     map.on('load', reportView);
+    // Les colonnes gardent une largeur constante à l'écran : on les recalcule quand le zoom change.
+    map.on('zoomend', () => {
+      if (!view3dRef.current) return;
+      (map.getSource('volumes') as GeoJSONSource | undefined)?.setData(volumeData(sceneRef.current, map.getZoom()));
+    });
 
     const observer = new ResizeObserver(() => map.resize());
     observer.observe(node);
@@ -264,10 +348,31 @@ export function MapView({ scene, view, fit, picking, showGraticule, onMapClick, 
     map.setLayoutProperty('graticule', 'visibility', showGraticule ? 'visible' : 'none');
   }, [showGraticule, ready]);
 
+  // Bascule entre la carte plane et le globe incliné.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    map.setProjection({ type: view3d ? 'globe' : 'mercator' });
+    if (view3d) {
+      map.dragRotate.enable();
+      map.touchPitch.enable();
+      map.touchZoomRotate.enableRotation();
+      map.keyboard.enableRotation();
+      map.easeTo({ pitch: 55, duration: 700 });
+    } else {
+      map.dragRotate.disable();
+      map.touchPitch.disable();
+      map.touchZoomRotate.disableRotation();
+      map.keyboard.disableRotation();
+      map.easeTo({ pitch: 0, bearing: 0, duration: 500 });
+    }
+  }, [view3d, ready]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
     (map.getSource('overlay') as GeoJSONSource | undefined)?.setData(overlayData(scene));
+    (map.getSource('volumes') as GeoJSONSource | undefined)?.setData(view3d ? volumeData(scene, map.getZoom()) : EMPTY);
 
     const seen = new Set<string>();
     const place = (key: string, pos: LatLon, signature: string, render: (el: HTMLElement) => void, selection: Selection) => {
@@ -317,7 +422,7 @@ export function MapView({ scene, view, fit, picking, showGraticule, onMapClick, 
       entries.current.delete(key);
       selections.current.delete(key);
     }
-  }, [scene, ready]);
+  }, [scene, ready, view3d]);
 
   return (
     <div className={`mapview${picking ? ' mapview--picking' : ''}`}>
@@ -325,6 +430,11 @@ export function MapView({ scene, view, fit, picking, showGraticule, onMapClick, 
       {failed ? <div className="mapview__error">La carte n’a pas pu être affichée : {failed}</div> : null}
       {!ready && !failed ? <div className="mapview__loading">Chargement de la carte…</div> : null}
       <div className="mapview__readout">{cursor ? formatLatLon(cursor.lat, cursor.lon) : 'WGS84'}</div>
+      {view3d ? (
+        <div className="mapview__mode">
+          Vue 3D · altitudes × {ALTITUDE_EXAGGERATION} · terrain schématique (zones du scénario) · clic droit ou Ctrl + glisser : tourner et incliner
+        </div>
+      ) : null}
       <div className="mapview__credit">Fond : Natural Earth (domaine public) · Carte : MapLibre GL JS</div>
     </div>
   );

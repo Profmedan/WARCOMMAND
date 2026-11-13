@@ -8,7 +8,7 @@
  * (`checkScenario`) est recalculée à chaque modification.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { clockZ, type Difficulty, type LatLon, type Roe, type SideId, type UnitKind } from '@warcommand/simulation-core';
+import { clockZ, isGroundForce, isNaval, TERRAIN, UNIT_KINDS, type Difficulty, type LatLon, type Roe, type SideId, type TerrainKind, type UnitKind } from '@warcommand/simulation-core';
 import { MISSION_KIND } from '@warcommand/air-operations';
 import { INITIAL_POSTURES } from '@warcommand/ai-commander';
 import { DOCTRINE_KEY_INFO, DOCTRINE_KEYS, DOCTRINES, hasDoctrine, getDoctrine } from '@warcommand/doctrine-engine';
@@ -16,6 +16,8 @@ import {
   addBase,
   addGroup,
   addMission,
+  addSatellite,
+  addTerrain,
   addTrigger,
   addUnit,
   checkScenario,
@@ -26,6 +28,8 @@ import {
   removeBase,
   removeGroup,
   removeMission,
+  removeSatellite,
+  removeTerrain,
   removeTrigger,
   removeUnit,
   renameGroup,
@@ -37,15 +41,17 @@ import {
   setSide,
   updateBase,
   updateMission,
+  updateSatellite,
+  updateTerrain,
   updateUnit,
   type EditResult,
   type InitialMissionType,
   type QuickTestResult,
 } from '@warcommand/mission-editor';
 import { parseScenario, type Scenario } from '@warcommand/scenario-system';
-import { getPlatform, hasPlatform, libraryGroups } from '@warcommand/unit-database';
+import { getPlatform, hasPlatform, JOINT_STAT_LABELS, libraryGroups, type JointStatKey } from '@warcommand/unit-database';
 import { MapView, type MapViewState } from '../../world-map/MapView';
-import { sceneFromScenario, type Selection } from '../../world-map/scene';
+import { groundFrame, sceneFromScenario, type Selection } from '../../world-map/scene';
 import { downloadJson } from '../controller';
 import { scenarioFileName } from '../scenarioStore';
 import {
@@ -60,6 +66,7 @@ import {
   POSTURE_LABEL,
   ROE_LABEL,
   SIDE_LABEL,
+  TERRAIN_LABEL,
 } from '../i18n';
 import { EditNumber, EditText } from './fields';
 
@@ -75,13 +82,14 @@ interface Props {
   onQuit: () => void;
 }
 
-type Section = 'scenario' | 'coalitions' | 'forces' | 'missions' | 'objectif' | 'declencheurs';
+type Section = 'scenario' | 'coalitions' | 'forces' | 'missions' | 'objectif' | 'terrain' | 'declencheurs';
 const SECTIONS: [Section, string][] = [
   ['scenario', 'Scénario'],
   ['coalitions', 'Coalitions'],
   ['forces', 'Forces'],
   ['missions', 'Missions'],
   ['objectif', 'Objectif'],
+  ['terrain', 'Terrain'],
   ['declencheurs', 'Déclencheurs'],
 ];
 
@@ -94,7 +102,11 @@ type Tool =
   | { type: 'zone'; side: SideId }
   | { type: 'waypoints' }
   | { type: 'patrol'; unitId: string; points: LatLon[] }
-  | { type: 'trigger-zone' };
+  | { type: 'trigger-zone' }
+  /** Pose une zone de terrain, ou déplace celle dont `id` est donné. */
+  | { type: 'terrain'; kind: TerrainKind; id?: string }
+  /** Pose l'empreinte d'un satellite, ou déplace celle dont `id` est donné. */
+  | { type: 'satellite'; side: SideId; id?: string };
 
 interface MissionForm {
   index: number | null;
@@ -134,11 +146,18 @@ interface TriggerForm {
 const SIDE_LIST: SideId[] = ['BLUE', 'RED'];
 const ROES: Roe[] = ['hold', 'defensive', 'free'];
 const DIFFICULTIES: Difficulty[] = ['recrue', 'standard', 'veteran'];
-const KINDS: UnitKind[] = ['fighter', 'aew', 'tanker', 'drone', 'sam', 'ship'];
+const KINDS: readonly UnitKind[] = UNIT_KINDS;
+const TERRAIN_KINDS: TerrainKind[] = ['urbain', 'foret', 'montagne', 'marais'];
+const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+const factor = (value: number) => `×${String(value).replace('.', ',')}`;
+/** Ce qu'une zone de terrain change, en clair (valeurs de jeu). */
+const terrainEffect = (kind: TerrainKind) =>
+  `Vitesse ${factor(TERRAIN[kind].mobility)} · protection du défenseur ${factor(TERRAIN[kind].defence)} · distance d’observation ${factor(TERRAIN[kind].concealment)}.`;
 const ALTITUDES = [500, 3000, 6000, 7500, 8000, 8800, 9000, 11000];
 const tone = (side: SideId) => (side === 'BLUE' ? 'blue' : 'red');
 const kindOf = (platformId: string): UnitKind | null => (hasPlatform(platformId) ? getPlatform(platformId).kind : null);
 const isAircraft = (platformId: string) => hasPlatform(platformId) && getPlatform(platformId).domain === 'air';
+const liftOf = (platformId: string) => (hasPlatform(platformId) ? (getPlatform(platformId).joint?.lift?.value ?? 0) : 0);
 
 const blankMission = (draft: Scenario, side: SideId): MissionForm => ({
   index: null,
@@ -184,6 +203,7 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
   const [libraryId, setLibraryId] = useState('rafale');
   const [libraryCount, setLibraryCount] = useState(1);
   const [libraryAirborne, setLibraryAirborne] = useState(false);
+  const [terrainKind, setTerrainKind] = useState<TerrainKind>('urbain');
   const [mission, setMission] = useState<MissionForm>(() => blankMission(initial, 'BLUE'));
   const [trigger, setTrigger] = useState<TriggerForm>(() => blankTrigger(initial));
   const [test, setTest] = useState<QuickTestResult | 'running' | null>(null);
@@ -191,7 +211,8 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
   const [playDifficulty, setPlayDifficulty] = useState<Difficulty>(initial.difficulty);
   const [confirmQuit, setConfirmQuit] = useState(false);
   const view = useRef<MapViewState | null>(null);
-  const initialFit = useRef(initial.region.bounds);
+  // Objectif terrestre : on ouvre sur ses abords plutôt que sur tout le théâtre.
+  const initialFit = useRef((initial.objective.kind === 'ground' ? groundFrame(initial.objective.center) : undefined) ?? initial.region.bounds);
 
   const check = useMemo(() => checkScenario(draft), [draft]);
   const say = (text: string, bad = false) => setNotice({ text, bad });
@@ -280,6 +301,14 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
         setTrigger({ ...trigger, zoneCenter: pos });
         setTool({ type: 'none' });
         return;
+      case 'terrain':
+        apply(tool.id ? updateTerrain(draft, tool.id, { center: pos }) : addTerrain(draft, { kind: tool.kind, center: pos }));
+        setTool({ type: 'none' });
+        return;
+      case 'satellite':
+        apply(tool.id ? updateSatellite(draft, tool.id, { center: pos }) : addSatellite(draft, { side: tool.side, center: pos }));
+        setTool({ type: 'none' });
+        return;
       default:
         setSelection(null);
     }
@@ -302,6 +331,8 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
     waypoints: `Cliquez les points de la mission (${mission.waypoints.length} posé${mission.waypoints.length > 1 ? 's' : ''}) · Échap ou « Terminer » pour finir`,
     patrol: tool.type === 'patrol' ? `Cliquez les points de la patrouille (${tool.points.length} posé${tool.points.length > 1 ? 's' : ''}), puis terminez` : '',
     'trigger-zone': 'Cliquez le centre de la zone du déclencheur',
+    terrain: 'Cliquez le centre de la zone de terrain',
+    satellite: 'Cliquez le centre de l’empreinte du satellite',
   };
 
   /* ---------------------------------------------------------------- Section : scénario */
@@ -451,6 +482,17 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
             {def.aiInitialPosture !== null ? (
               <EditNumber label="Posture tenue pendant" suffix="min" value={def.aiPostureLockMin} onCommit={(v) => apply(setSide(draft, side, { aiPostureLockMin: v }))} />
             ) : null}
+            <h4>Réseaux et effets multi-domaines</h4>
+            <label className="field">
+              <span>Résilience des réseaux et services : {Math.round(def.resilience * 100)} %</span>
+              <input type="range" min={0} max={100} step={5} value={Math.round(def.resilience * 100)} onChange={(e) => apply(setSide(draft, side, { resilience: Number(e.target.value) / 100 }))} />
+              <small className="hint">Raccourcit les perturbations subies et accélère le rétablissement.</small>
+            </label>
+            <div className="grid2">
+              <EditNumber label="Perturbations des réseaux adverses" value={def.effects.cyber} onCommit={(v) => apply(setSide(draft, side, { effects: { ...def.effects, cyber: v } }))} />
+              <EditNumber label="Brouillages des services spatiaux adverses" value={def.effects.jam} onCommit={(v) => apply(setSide(draft, side, { effects: { ...def.effects, jam: v } }))} />
+            </div>
+            <p className="hint">Effets abstraits et temporaires, de zéro à cinq de chaque sorte, que ce camp pourra employer en cours de partie.</p>
           </section>
         );
       })}
@@ -462,20 +504,22 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
   const record = hasPlatform(libraryId) ? getPlatform(libraryId) : null;
   const sideBases = draft.bases.filter((b) => b.side === forcesSide);
 
+  /** Aéronefs au sol et équipes spéciales : rattachés d'emblée à une base du camp, sans passer par la carte. */
+  const toBase = record ? (record.domain === 'air' && !libraryAirborne) || record.kind === 'sof' : false;
   const addFromLibrary = () => {
     if (!record) return;
-    if (record.domain === 'air' && !libraryAirborne) {
-      // Aéronefs au sol : rattachés d'emblée à une base du camp, sans passer par la carte.
+    if (toBase) {
       const base = sideBases[0];
       if (!base) {
-        say('Ajoutez d’abord une base pour ce camp : un aéronef doit être rattaché à une base.', true);
+        say(`Ajoutez d’abord une base pour ce camp : ${record.kind === 'sof' ? 'une équipe spéciale part d’une base' : 'un aéronef doit être rattaché à une base'}.`, true);
         return;
       }
-      const chosen = selection?.type === 'base' && sideBases.some((b) => b.id === selection.id) ? selection.id : base.id;
+      // La base sélectionnée si elle est de ce camp ; sinon le moteur d'édition choisit la plus proche qui convient.
+      const chosen = selection?.type === 'base' && sideBases.some((b) => b.id === selection.id) ? selection.id : undefined;
       let next = draft;
       let lastId: string | undefined;
       for (let i = 0; i < libraryCount; i++) {
-        const res = addUnit(next, { side: forcesSide, platformId: record.id, pos: base.pos, baseId: chosen });
+        const res = addUnit(next, { side: forcesSide, platformId: record.id, pos: base.pos, ...(chosen ? { baseId: chosen } : {}) });
         if (!res.ok) {
           say(res.error, true);
           break;
@@ -524,9 +568,19 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
       </label>
       {record ? (
         <p className="muted">
-          {record.role} · {record.generic ? 'matériel générique, sans équivalent réel' : record.country}. Radar {record.game.radarRangeKm.value} km
-          {record.game.weaponCount.value > 0 ? ` · ${record.game.weaponCount.value} missiles de ${record.game.weaponRangeKm.value} km` : ''}
-          {record.loadouts.some((l) => l.asm > 0) ? ' · emport air-surface possible' : ''}. Valeurs de jeu.
+          {record.role} · {record.generic ? 'matériel générique, sans équivalent réel' : record.country}.{' '}
+          {[
+            record.game.radarRangeKm.value > 0 ? `Radar ${record.game.radarRangeKm.value} km` : null,
+            record.game.weaponCount.value > 0 ? `${record.game.weaponCount.value} missiles de ${record.game.weaponRangeKm.value} km` : null,
+            record.loadouts.some((l) => l.asm > 0) ? 'emport air-surface possible' : null,
+            ...Object.entries(record.joint ?? {}).flatMap(([key, datum]) => {
+              const info = JOINT_STAT_LABELS[key as JointStatKey];
+              return datum ? [`${info.label.toLowerCase()} : ${datum.value}${info.unit ? ` ${info.unit}` : ''}`] : [];
+            }),
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+          . Valeurs de jeu.
         </p>
       ) : null}
       <div className="row">
@@ -548,16 +602,19 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
         ) : null}
       </div>
       <button type="button" className="btn btn--primary" onClick={addFromLibrary}>
-        {record?.domain === 'air' && !libraryAirborne ? `Ajouter à une base ${SIDE_LABEL[forcesSide]}` : `Placer sur la carte (${SIDE_LABEL[forcesSide]})`}
+        {toBase ? `Ajouter à une base ${SIDE_LABEL[forcesSide]}` : `Placer sur la carte (${SIDE_LABEL[forcesSide]})`}
       </button>
 
       <h4>Bases</h4>
-      {sideBases.length === 0 ? <p className="muted">Aucune base. Un aéronef doit être rattaché à une base.</p> : null}
+      {sideBases.length === 0 ? <p className="muted">Aucune base. Un aéronef ou une équipe spéciale doit être rattaché à une base.</p> : null}
       {sideBases.map((b) => (
         <button key={b.id} type="button" className={`unitrow${selection?.type === 'base' && selection.id === b.id ? ' is-selected' : ''}`} onClick={() => setSelection({ type: 'base', id: b.id })}>
           <span className={`dot dot--${tone(b.side)}`} aria-hidden="true" />
           <span className="unitrow__name">{b.name}</span>
-          <span className="unitrow__state">{draft.units.filter((u) => u.baseId === b.id).length} aéronef(s)</span>
+          <span className="unitrow__state">
+            {b.hostUnitId !== undefined ? 'embarquée · ' : ''}
+            {draft.units.filter((u) => u.baseId === b.id).length} unité(s)
+          </span>
         </button>
       ))}
       <button type="button" className={`btn btn--small${tool.type === 'base' ? ' is-on' : ''}`} onClick={() => setTool(tool.type === 'base' ? { type: 'none' } : { type: 'base', side: forcesSide })}>
@@ -583,7 +640,19 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
                 <button key={u.id} type="button" className={`unitrow${selection?.type === 'unit' && selection.id === u.id ? ' is-selected' : ''}`} onClick={() => setSelection({ type: 'unit', id: u.id })}>
                   <span className={`dot dot--${u.airborne ? 'airborne' : isAircraft(u.platformId) ? 'ready' : 'active'}`} aria-hidden="true" />
                   <span className="unitrow__name">{u.name}</span>
-                  <span className="unitrow__state">{u.airborne ? 'en vol' : isAircraft(u.platformId) ? (u.unavailableForMin ? `indispo. ${u.unavailableForMin} min` : 'au sol') : 'en position'}</span>
+                  <span className="unitrow__state">
+                    {u.airborne
+                      ? 'en vol'
+                      : isAircraft(u.platformId)
+                        ? u.unavailableForMin
+                          ? `indispo. ${u.unavailableForMin} min`
+                          : 'au sol'
+                        : u.embarkedIn !== undefined
+                          ? 'à bord'
+                          : kindOf(u.platformId) === 'sof'
+                            ? 'à sa base'
+                            : 'en position'}
+                  </span>
                 </button>
               ))}
             </div>
@@ -798,6 +867,18 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
     <div className="sheet">
       <EditText label="Nom du secteur" value={o.name} onCommit={(v) => apply(setObjective(draft, { name: v }))} />
       <label className="field">
+        <span>Nature de l’objectif</span>
+        <select className="input input--small" value={o.kind} onChange={(e) => apply(setObjective(draft, { kind: e.target.value as 'air' | 'ground' }))}>
+          <option value="air">Secteur aérien — disputé par la chasse</option>
+          <option value="ground">Zone terrestre — tenue par les formations de mêlée</option>
+        </select>
+        <small className="hint">
+          {o.kind === 'ground'
+            ? 'La zone revient au camp dont les formations de mêlée présentes sont nettement les plus fortes (une fois et demie l’adversaire) ; à forces comparables, elle est contestée.'
+            : 'Le secteur revient au camp qui y maintient seul des chasseurs en état de combattre.'}
+        </small>
+      </label>
+      <label className="field">
         <span>Défenseur</span>
         <select
           className="input input--small"
@@ -853,6 +934,109 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
           </div>
         );
       })}
+    </div>
+  );
+
+  /* ---------------------------------------------------------------- Section : terrain et satellites */
+
+  const renderTerrain = () => (
+    <div className="sheet">
+      <h4>Zones de terrain</h4>
+      <p className="hint">Hors de ces zones, le terrain est ouvert. Une zone ralentit, protège ou dissimule les formations terrestres qui s’y trouvent.</p>
+      {draft.terrain.length === 0 ? <p className="muted">Aucune zone : tout le terrain est ouvert.</p> : null}
+      {draft.terrain.map((t) => {
+        const moving = tool.type === 'terrain' && tool.id === t.id;
+        return (
+          <div key={t.id} className="subcard">
+            <EditText small ariaLabel="Nom de la zone" value={t.name} onCommit={(v) => apply(updateTerrain(draft, t.id, { name: v }))} />
+            <div className="row">
+              <select className="input input--small" aria-label="Nature du terrain" value={t.kind} onChange={(e) => apply(updateTerrain(draft, t.id, { kind: e.target.value as TerrainKind }))}>
+                {TERRAIN_KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {capital(TERRAIN_LABEL[k])}
+                  </option>
+                ))}
+              </select>
+              <EditNumber ariaLabel="Rayon de la zone" suffix="km" value={t.radiusKm} onCommit={(v) => apply(updateTerrain(draft, t.id, { radiusKm: v }))} />
+            </div>
+            <p className="muted">{terrainEffect(t.kind)}</p>
+            <div className="row">
+              <button type="button" className={`btn btn--small${moving ? ' is-on' : ''}`} onClick={() => setTool(moving ? { type: 'none' } : { type: 'terrain', kind: t.kind, id: t.id })}>
+                Déplacer
+              </button>
+              <button type="button" className="btn btn--small btn--ghost" onClick={() => apply(removeTerrain(draft, t.id))}>
+                Supprimer
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      <div className="row">
+        <select className="input input--small" aria-label="Nature de la zone à ajouter" value={terrainKind} onChange={(e) => setTerrainKind(e.target.value as TerrainKind)}>
+          {TERRAIN_KINDS.map((k) => (
+            <option key={k} value={k}>
+              {capital(TERRAIN_LABEL[k])}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className={`btn btn--small${tool.type === 'terrain' && tool.id === undefined ? ' is-on' : ''}`}
+          onClick={() => setTool(tool.type === 'terrain' && tool.id === undefined ? { type: 'none' } : { type: 'terrain', kind: terrainKind })}
+        >
+          Placer sur la carte
+        </button>
+      </div>
+      <p className="hint">{terrainEffect(terrainKind)} Valeurs de jeu.</p>
+
+      <h4>Satellites d’observation</h4>
+      <p className="hint">
+        Satellites fictifs. Pendant sa fenêtre, de jour, par temps clair et si ses liaisons par satellite ne sont pas perturbées, un camp voit ce qui se trouve dans l’empreinte au sol.
+      </p>
+      {draft.satellites.length === 0 ? <p className="muted">Aucun satellite.</p> : null}
+      {draft.satellites.map((p) => {
+        const moving = tool.type === 'satellite' && tool.id === p.id;
+        return (
+          <div key={p.id} className="subcard">
+            <div className="row row--tight">
+              <EditText small ariaLabel="Nom du satellite" value={p.name} onCommit={(v) => apply(updateSatellite(draft, p.id, { name: v }))} />
+              <select className="input input--small" aria-label="Camp du satellite" value={p.side} onChange={(e) => apply(updateSatellite(draft, p.id, { side: e.target.value as SideId }))}>
+                {SIDE_LIST.map((side) => (
+                  <option key={side} value={side}>
+                    {SIDE_LABEL[side]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="grid2">
+              <EditNumber label="Début de la fenêtre" suffix="min" value={p.startMin} onCommit={(v) => apply(updateSatellite(draft, p.id, { startMin: v }))} />
+              <EditNumber label="Fin de la fenêtre" suffix="min" value={p.endMin} onCommit={(v) => apply(updateSatellite(draft, p.id, { endMin: v }))} />
+            </div>
+            <p className="muted">
+              De {clockZ(draft.date, p.startMin * 60, false)} Z à {clockZ(draft.date, p.endMin * 60, false)} Z · empreinte centrée sur {formatLatLon(p.footprint.center.lat, p.footprint.center.lon)}
+            </p>
+            <div className="row">
+              <EditNumber ariaLabel="Rayon de l’empreinte" suffix="km" value={p.footprint.radiusKm} onCommit={(v) => apply(updateSatellite(draft, p.id, { radiusKm: v }))} />
+              <button type="button" className={`btn btn--small${moving ? ' is-on' : ''}`} onClick={() => setTool(moving ? { type: 'none' } : { type: 'satellite', side: p.side, id: p.id })}>
+                Déplacer
+              </button>
+              <button type="button" className="btn btn--small btn--ghost" onClick={() => apply(removeSatellite(draft, p.id))}>
+                Supprimer
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      <div className="row">
+        {SIDE_LIST.map((side) => {
+          const on = tool.type === 'satellite' && tool.id === undefined && tool.side === side;
+          return (
+            <button key={side} type="button" className={`btn btn--small${on ? ' is-on' : ''}`} onClick={() => setTool(on ? { type: 'none' } : { type: 'satellite', side })}>
+              Ajouter un satellite {SIDE_LABEL[side]}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 
@@ -1032,6 +1216,13 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
       const u = selectedUnit;
       const platform = hasPlatform(u.platformId) ? getPlatform(u.platformId) : null;
       const air = platform?.domain === 'air';
+      const sof = platform?.kind === 'sof';
+      const ground = platform ? isGroundForce(platform.kind) : false;
+      const naval = platform ? isNaval(platform.kind) : false;
+      const transports = ground ? draft.units.filter((x) => x.side === u.side && liftOf(x.platformId) > 0) : [];
+      const fleet = naval ? draft.units.filter((x) => x.side === u.side && x.id !== u.id && hasPlatform(x.platformId) && isNaval(getPlatform(x.platformId).kind)) : [];
+      const hosted = draft.bases.find((b) => b.hostUnitId === u.id);
+      const ashoreHint = 'Pour la remettre à terre : « Déplacer », puis cliquez un point de la côte.';
       const enemy: SideId = u.side === 'BLUE' ? 'RED' : 'BLUE';
       const intel = draft.intel.find((k) => k.side === enemy && k.unitId === u.id);
       const drawing = tool.type === 'patrol' && tool.unitId === u.id;
@@ -1054,12 +1245,12 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
                 ))}
             </select>
           </label>
-          {air ? (
+          {air || sof ? (
             <label className="field">
               <span>Base</span>
               <select className="input input--small" value={u.baseId ?? ''} onChange={(e) => apply(updateUnit(draft, u.id, { baseId: e.target.value }))}>
                 {draft.bases
-                  .filter((b) => b.side === u.side)
+                  .filter((b) => b.side === u.side && (!sof || b.hostUnitId === undefined))
                   .map((b) => (
                     <option key={b.id} value={b.id}>
                       {b.name}
@@ -1068,10 +1259,13 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
               </select>
             </label>
           ) : null}
-          <label className="field">
-            <span>Entraînement de l’équipage : {Math.round(u.crew * 100)} %</span>
-            <input type="range" min={0} max={100} step={5} value={Math.round(u.crew * 100)} onChange={(e) => apply(updateUnit(draft, u.id, { crew: Number(e.target.value) / 100 }))} />
-          </label>
+          {/* L'entraînement ne pèse que sur le tir des missiles : sans objet pour une formation terrestre ou une équipe spéciale. */}
+          {ground || sof ? null : (
+            <label className="field">
+              <span>Entraînement de l’équipage : {Math.round(u.crew * 100)} %</span>
+              <input type="range" min={0} max={100} step={5} value={Math.round(u.crew * 100)} onChange={(e) => apply(updateUnit(draft, u.id, { crew: Number(e.target.value) / 100 }))} />
+            </label>
+          )}
 
           {air ? (
             <>
@@ -1107,7 +1301,93 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
             </>
           ) : null}
 
-          {platform?.kind === 'ship' ? (
+          {ground ? (
+            <>
+              {(
+                [
+                  ['strength', 'Effectifs', 1, 25],
+                  ['morale', 'Moral', 0.8, 0],
+                  ['supply', 'Ravitaillement', 1, 0],
+                ] as const
+              ).map(([key, label, fallback, min]) => {
+                const value = Math.round((u[key] ?? fallback) * 100);
+                return (
+                  <label key={key} className="field">
+                    <span>
+                      {label} au début : {value} %
+                    </span>
+                    <input
+                      type="range"
+                      min={min}
+                      max={100}
+                      step={5}
+                      value={value}
+                      onChange={(e) => {
+                        const v = Number(e.target.value) / 100;
+                        apply(updateUnit(draft, u.id, key === 'strength' ? { strength: v } : key === 'morale' ? { morale: v } : { supply: v }));
+                      }}
+                    />
+                  </label>
+                );
+              })}
+              <label className="field">
+                <span>Posture de départ</span>
+                <select className="input input--small" value={u.posture ?? 'hold'} onChange={(e) => apply(updateUnit(draft, u.id, { posture: e.target.value as 'hold' | 'defend' }))}>
+                  <option value="hold">En attente</option>
+                  <option value="defend">En défense : elle se retranche</option>
+                </select>
+              </label>
+              {u.embarkedIn !== undefined || transports.length > 0 ? (
+                <label className="field">
+                  <span>Embarquement</span>
+                  <select
+                    className="input input--small"
+                    value={u.embarkedIn ?? ''}
+                    onChange={(e) => {
+                      if (e.target.value === '') say(ashoreHint);
+                      else apply(updateUnit(draft, u.id, { embarkedIn: e.target.value }));
+                    }}
+                  >
+                    <option value="">À terre</option>
+                    {transports.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        À bord de {t.name}
+                      </option>
+                    ))}
+                  </select>
+                  {u.embarkedIn !== undefined ? <small className="hint">{ashoreHint}</small> : null}
+                </label>
+              ) : null}
+            </>
+          ) : null}
+
+          {naval ? (
+            <label className="field">
+              <span>Chef de file</span>
+              <select className="input input--small" value={u.leaderId ?? ''} onChange={(e) => apply(updateUnit(draft, u.id, { leaderId: e.target.value === '' ? null : e.target.value }))}>
+                <option value="">Navigue seul</option>
+                {fleet.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    Suit {x.name}
+                  </option>
+                ))}
+              </select>
+              <small className="hint">Une escorte garde son poste auprès de son chef de file.</small>
+            </label>
+          ) : null}
+          {hosted ? (
+            <div className="field">
+              <span>{hosted.name}</span>
+              <p className="muted">Base portée par ce bâtiment : elle le suit, et ses stocks se règlent comme ceux d’une base.</p>
+              <div className="row">
+                <button type="button" className="btn btn--small" onClick={() => setSelection({ type: 'base', id: hosted.id })}>
+                  Régler ses stocks
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {naval ? (
             <div className="field">
               <span>Patrouille</span>
               <p className="muted">{u.patrol && u.patrol.length > 0 ? `${u.patrol.length} point(s), dans la zone de manœuvre du camp.` : 'Immobile.'}</p>
@@ -1145,7 +1425,7 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
           {intel ? <EditNumber label="Âge du renseignement" suffix="min" value={intel.ageMin} onCommit={(v) => apply(setIntel(draft, enemy, u.id, v))} /> : null}
 
           <div className="actions">
-            {!air || u.airborne ? (
+            {!sof && (!air || u.airborne) ? (
               <button type="button" className={`btn${tool.type === 'move' ? ' is-on' : ''}`} onClick={() => setTool({ type: 'move', target: { type: 'unit', id: u.id } })}>
                 Déplacer
               </button>
@@ -1166,21 +1446,31 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
 
     if (selectedBase) {
       const b = selectedBase;
+      const host = draft.units.find((x) => x.id === b.hostUnitId);
       return (
         <div className="sheet">
           <p className="sheet__eyebrow">
-            Base aérienne · <span className={`txt--${tone(b.side)}`}>{SIDE_LABEL[b.side]}</span>
+            {host ? 'Base embarquée' : 'Base'} · <span className={`txt--${tone(b.side)}`}>{SIDE_LABEL[b.side]}</span>
           </p>
           <EditText label="Nom" value={b.name} onCommit={(v) => apply(updateBase(draft, b.id, { name: v }))} />
-          <p className="muted">{formatLatLon(b.pos.lat, b.pos.lon)}</p>
+          <p className="muted">{host ? `Portée par ${host.name} : elle le suit.` : formatLatLon(b.pos.lat, b.pos.lon)}</p>
           <h4>Stocks</h4>
           <EditNumber label="Missiles air-air" value={b.weaponStock} onCommit={(v) => apply(updateBase(draft, b.id, { weaponStock: v }))} />
-          <EditNumber label="Munitions air-surface" value={b.asmStock} onCommit={(v) => apply(updateBase(draft, b.id, { asmStock: v }))} hint="Nécessaires aux missions d’attaque des défenses sol-air." />
+          <EditNumber label="Munitions air-surface" value={b.asmStock} onCommit={(v) => apply(updateBase(draft, b.id, { asmStock: v }))} hint="Nécessaires aux missions d’attaque des défenses sol-air et d’appui aérien rapproché." />
           <EditNumber label="Carburant" suffix="t" value={Math.round(b.fuelStockKg / 1000)} onCommit={(v) => apply(updateBase(draft, b.id, { fuelStockKg: v * 1000 }))} />
+          <EditNumber
+            label="Ravitaillement des forces terrestres et navales"
+            suffix="points"
+            value={b.supplyStock}
+            onCommit={(v) => apply(updateBase(draft, b.id, { supplyStock: v }))}
+            hint="Au-dessus de zéro, la base est un dépôt : formations et bâtiments proches s’y ravitaillent."
+          />
           <div className="actions">
-            <button type="button" className={`btn${tool.type === 'move' ? ' is-on' : ''}`} onClick={() => setTool({ type: 'move', target: { type: 'base', id: b.id } })}>
-              Déplacer
-            </button>
+            {host ? null : (
+              <button type="button" className={`btn${tool.type === 'move' ? ' is-on' : ''}`} onClick={() => setTool({ type: 'move', target: { type: 'base', id: b.id } })}>
+                Déplacer
+              </button>
+            )}
             <button
               type="button"
               className="btn btn--ghost"
@@ -1191,7 +1481,7 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
               Supprimer la base
             </button>
           </div>
-          <p className="hint">Posez les bases sur la terre ferme : le jeu ne le vérifie pas.</p>
+          {host ? null : <p className="hint">Posez les bases sur la terre ferme : le jeu ne le vérifie pas.</p>}
         </div>
       );
     }
@@ -1320,6 +1610,7 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
           {section === 'forces' ? renderForces() : null}
           {section === 'missions' ? renderMissions() : null}
           {section === 'objectif' ? renderObjective() : null}
+          {section === 'terrain' ? renderTerrain() : null}
           {section === 'declencheurs' ? renderTriggers() : null}
         </div>
       </aside>
@@ -1374,7 +1665,11 @@ export function Editor({ initial, initialDirty = false, onDraftChange, onPlay, o
                 {Math.round(test.controlMin.BLUE)} min, ROUGE {Math.round(test.controlMin.RED)} min, contesté {Math.round(test.controlMin.CONTESTED)} min
               </p>
               <p className="muted">
-                Sorties {test.sorties.BLUE}/{test.sorties.RED} · tirs {test.shots.BLUE}/{test.shots.RED} · chasseurs perdus {test.fightersLost.BLUE}/{test.fightersLost.RED} (BLEU/ROUGE) · {test.events} événements
+                Sorties {test.sorties.BLUE}/{test.sorties.RED} · tirs {test.shots.BLUE}/{test.shots.RED} · chasseurs perdus {test.fightersLost.BLUE}/{test.fightersLost.RED}
+                {test.landStrengthLost.BLUE + test.landStrengthLost.RED > 0
+                  ? ` · effectifs perdus à terre ${test.landStrengthLost.BLUE.toFixed(1).replace('.', ',')}/${test.landStrengthLost.RED.toFixed(1).replace('.', ',')} formation`
+                  : ''}{' '}
+                (BLEU/ROUGE) · {test.events} événements
               </p>
               {test.violations.length === 0 ? <p className="tone--good">Aucune incohérence du moteur.</p> : test.violations.map((v) => <p key={v} className="tone--alert">{v}</p>)}
             </>

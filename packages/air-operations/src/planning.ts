@@ -3,7 +3,7 @@
  * Ces fonctions n'utilisent que des données propres au camp (ses appareils, ses bases, ses pistes).
  */
 import { distanceKm, type LatLon, type PlatformPerf, type Rules, type SideId, type SimState } from '@warcommand/simulation-core';
-import { baseOf, burnRateKgMin, fuelToFlyKg, perfOf, scrambleDelayS } from './helpers';
+import { airOrderDelayS, baseOf, burnRateKgMin, fuelToFlyKg, perfOf } from './helpers';
 import type { MissionDraft } from './orders';
 
 export interface RangeQuery {
@@ -83,7 +83,7 @@ export function estimateMission(s: SimState, side: SideId, d: MissionDraft): Mis
     if (!airborne) {
       const wanted = d.loadoutId ?? (d.type === 'SEAD' ? (p.loadouts.find((l) => l.asm > 0)?.id ?? null) : null);
       const rearm = u.status === 'ready' && wanted !== null && wanted !== u.loadoutId ? s.time + s.rules.rearmDelayS : 0;
-      departAt = Math.max(d.launchAt, s.time + scrambleDelayS(s.rules, s.doctrine[side]), u.availableAt, u.readyAt ?? 0, rearm);
+      departAt = Math.max(d.launchAt, s.time + airOrderDelayS(s, side), u.availableAt, u.readyAt ?? 0, rearm);
     }
 
     const speed = d.speed === 'dash' ? p.dashKmh : p.cruiseKmh;

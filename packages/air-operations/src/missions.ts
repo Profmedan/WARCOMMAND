@@ -96,6 +96,11 @@ export const missionSystem: System = (s) => {
     if (s.time >= m.launchAt) {
       let launched = 0;
       for (const u of members) {
+        // Base fermée (pont d'envol hors service) : l'appareil reste cloué au sol et quitte la mission.
+        if (u.status !== 'airborne' && baseOf(s, u)?.closed) {
+          u.missionId = null;
+          continue;
+        }
         if (u.status === 'ready' && s.time >= u.availableAt) {
           takeOff(s, u, m);
           launched += 1;

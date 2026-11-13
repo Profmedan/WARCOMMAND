@@ -10,6 +10,9 @@
  * désigné. Un coup au but décisif détruit le site (ou met le bâtiment hors de combat) ; sinon il
  * le neutralise dix minutes ; un tir manqué lui impose deux minutes de silence.
  *
+ * Appui rapproché (CAS) : la cible est une formation terrestre ; un coup au but lui coûte des
+ * effectifs, de la cohésion et du moral, sans la neutraliser.
+ *
  * Toutes les valeurs sont des paramètres de jeu (voir docs/modele-de-jeu.md).
  */
 import {
@@ -17,9 +20,15 @@ import {
   bearingDeg,
   distanceKm,
   emit,
+  isGroundForce,
+  isSurfaceShip,
   opponent,
   radarHorizonKm,
   rand,
+  serviceDegraded,
+  shotFacts,
+  TERRAIN,
+  terrainAt,
   type Contact,
   type PlatformPerf,
   type Roe,
@@ -28,7 +37,7 @@ import {
   type System,
   type Unit,
 } from '@warcommand/simulation-core';
-import { destroyUnit, missionOf, perfOf, radarEmitting, roeAllows, shotsInFlightOn } from './helpers';
+import { destroyUnit, hitShip, missionOf, perfOf, radarEmitting, roeAllows, shotsInFlightOn } from './helpers';
 import { canSeeSurface, nightNow, observe, sensorHeightM } from './sensors';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -50,13 +59,38 @@ export function hitProbability(s: SimState, shot: Shot, target: Unit, targetPerf
   return clamp(base * rangeFactor(shot) * crewFactor * ecmFactor * awarenessFactor * sizeFactor * damageFactor, r.pkMin, r.pkMax);
 }
 
-/** Probabilité de coup au but d'une munition air-surface sur un site sol-air ou un bâtiment. */
+/**
+ * Probabilité de coup au but d'une munition air-surface : sur un site sol-air, sur un bâtiment
+ * (qui se défend), ou sur une formation terrestre (que le terrain peut dissimuler).
+ */
 export function asmHitProbability(s: SimState, shot: Shot, target: Unit): number {
   const r = s.rules;
   const crewFactor = 0.8 + 0.4 * shot.shooterCrew;
-  const defence = target.kind === 'ship' ? r.shipDefenceFactor : 1;
+  const defence = isSurfaceShip(target.kind) ? r.shipDefenceFactor : target.land ? TERRAIN[terrainAt(s, target.pos)].concealment : 1;
   const intel = shot.intelStale ? r.staleIntelFactor : 1;
-  return clamp(r.pkBaseAsm * rangeFactor(shot) * crewFactor * defence * intel, r.pkMin, r.pkMax);
+  // Munition guidée : elle perd en précision si la navigation par satellite du tireur est dégradée.
+  const guidance = serviceDegraded(s, shot.side, 'nav') ? r.navDegradedFactor : 1;
+  return clamp(r.pkBaseAsm * rangeFactor(shot) * crewFactor * defence * intel * guidance, r.pkMin, r.pkMax);
+}
+
+/**
+ * Effet d'un coup au but sur une formation terrestre : des effectifs, de la cohésion et du moral
+ * perdus ; le retranchement protège les effectifs. Sous le seuil, la formation est hors de combat.
+ */
+export function strikeFormation(s: SimState, target: Unit): 'attrition' | 'destroyed' {
+  const l = target.land!;
+  const r = s.rules;
+  const loss = Math.min(l.strength, r.casStrengthLoss / (1 + r.dugInBonus * l.dugIn));
+  l.strength -= loss;
+  l.cohesion = Math.max(0, l.cohesion - r.casCohesionLoss);
+  l.morale = Math.max(0, l.morale - r.casMoraleLoss);
+  s.stats[target.side].landStrengthLost += loss;
+  if (l.strength >= r.landDestroyedBelow) return 'attrition';
+  l.inContact = false;
+  l.casSince = -1;
+  emit(s, 'UNIT_DESTROYED', [target.side], { unit: target.name });
+  destroyUnit(s, target);
+  return 'destroyed';
 }
 
 function resolveAirShot(s: SimState, shot: Shot, target: Unit, observed: boolean, tracked: Contact | undefined): void {
@@ -68,7 +102,7 @@ function resolveAirShot(s: SimState, shot: Shot, target: Unit, observed: boolean
     const lethal = target.damaged || rand(s.rng, 'sim') < s.rules.killGivenHit;
     result = lethal ? 'destroyed' : 'damaged';
   }
-  emit(s, 'SHOT_RESOLVED', [], { shooter: shot.shooterName, target: target.name, weapon: shot.weapon, pk: round3(pk), roll: round3(roll), result });
+  emit(s, 'SHOT_RESOLVED', [], { ...shotFacts(shot, target.name), pk: round3(pk), roll: round3(roll), hit: roll < pk ? 1 : 0, result });
 
   const seen = observed ? result : 'unobserved';
   if (result === 'destroyed') {
@@ -94,8 +128,13 @@ function surfaceResultWitnessed(s: SimState, shot: Shot, target: Unit): boolean 
   const night = nightNow(s);
   const closeKm = s.rules.bdaRangeKm * (night ? s.rules.nightVisualFactor : 1);
   for (const u of Object.values(s.units)) {
-    if (u.side !== shot.side || u.status !== 'airborne') continue;
-    if (canSeeSurface(s, u, target.pos, night) || distanceKm(u.pos, target.pos) <= closeKm) return true;
+    if (u.side !== shot.side) continue;
+    if (u.status === 'airborne') {
+      if (canSeeSurface(s, u, target.pos, night) || distanceKm(u.pos, target.pos) <= closeKm) return true;
+    } else if (u.status === 'active' && u.land && distanceKm(u.pos, target.pos) <= perfOf(s, u).spotKm) {
+      // Une formation terrestre qui a la cible sous les yeux constate le résultat du tir.
+      return true;
+    }
   }
   return false;
 }
@@ -103,29 +142,38 @@ function surfaceResultWitnessed(s: SimState, shot: Shot, target: Unit): boolean 
 function resolveSurfaceShot(s: SimState, shot: Shot, target: Unit, tracked: Contact | undefined): void {
   const pk = asmHitProbability(s, shot, target);
   const roll = rand(s.rng, 'sim');
-  let result: 'miss' | 'suppressed' | 'damaged' | 'destroyed' = 'miss';
+  let result: 'miss' | 'suppressed' | 'damaged' | 'destroyed' | 'attrition' = 'miss';
+  // Le constat se fait sur la cible telle qu'elle est au moment de l'impact, avant qu'elle ne disparaisse.
+  const witnessed = surfaceResultWitnessed(s, shot, target);
   if (roll < pk) {
     s.stats[shot.side].hits += 1;
-    const decisive = rand(s.rng, 'sim') < s.rules.asmKillGivenHit;
-    result = !decisive ? 'suppressed' : target.kind === 'ship' ? 'damaged' : 'destroyed';
+    if (target.land) {
+      result = strikeFormation(s, target);
+      if (result === 'destroyed') s.stats[shot.side].kills += 1;
+    } else {
+      const decisive = rand(s.rng, 'sim') < s.rules.asmKillGivenHit;
+      if (!decisive) result = 'suppressed';
+      else if (!target.naval) result = 'destroyed';
+      else {
+        // Bâtiment : un point de coque. Il est mis hors de combat, ou coule s'il n'en a plus.
+        const outcome = hitShip(s, target, 1);
+        result = outcome === 'sunk' ? 'destroyed' : outcome === 'damaged' ? 'damaged' : 'suppressed';
+        if (outcome === 'sunk') s.stats[shot.side].kills += 1;
+        if (outcome === 'damaged' && witnessed && tracked) tracked.damaged = true;
+      }
+    }
   }
-  emit(s, 'SHOT_RESOLVED', [], { shooter: shot.shooterName, target: target.name, weapon: shot.weapon, pk: round3(pk), roll: round3(roll), result });
-
-  const witnessed = surfaceResultWitnessed(s, shot, target);
+  emit(s, 'SHOT_RESOLVED', [], { ...shotFacts(shot, target.name), pk: round3(pk), roll: round3(roll), hit: roll < pk ? 1 : 0, result });
   emit(s, 'SHOT_RESULT', [shot.side], { unit: shot.shooterName, contact: shot.contactId, result: witnessed ? result : 'unobserved' });
+  // Une formation terrestre encaisse ou disparaît : rien d'autre à appliquer.
+  if (target.land) return;
 
+  // Un bâtiment a déjà encaissé le coup (coque, avarie, naufrage) : seul un coup non décisif le neutralise un temps.
+  if (target.naval && result !== 'suppressed' && result !== 'miss') return;
   if (result === 'destroyed') {
     s.stats[shot.side].kills += 1;
     emit(s, 'UNIT_DESTROYED', [target.side], { unit: target.name });
     destroyUnit(s, target);
-    return;
-  }
-  if (result === 'damaged') {
-    // Bâtiment hors de combat : ni radar ni tir jusqu'à la fin, mais il reste à flot.
-    target.damaged = true;
-    s.stats[target.side].damaged += 1;
-    if (witnessed && tracked) tracked.damaged = true;
-    emit(s, 'UNIT_DAMAGED', [target.side], { unit: target.name });
     return;
   }
   const duration = result === 'suppressed' ? s.rules.suppressHitS : s.rules.suppressMissS;
@@ -140,6 +188,11 @@ function resolveShots(s: SimState): void {
   const pending: Shot[] = [];
   for (const shot of s.shots) {
     if (shot.impactAt > s.time) {
+      pending.push(shot);
+      continue;
+    }
+    // Les armes navales (missiles antinavires, torpilles, armes anti-sous-marines) sont résolues par naval-operations.
+    if (shot.weapon === 'ssm' || shot.weapon === 'torpedo' || shot.weapon === 'asw') {
       pending.push(shot);
       continue;
     }
@@ -258,16 +311,23 @@ function fire(s: SimState, u: Unit, p: PlatformPerf, contact: Contact, rangeKm: 
   if (aware) emit(s, 'MISSILE_WARNING', [enemy], { unit: target.name });
 }
 
-/** Tir air-surface d'un chasseur en mission d'attaque sur le site désigné. */
+/**
+ * Tir air-surface d'un chasseur en passe d'attaque : sur le site ou le bâtiment désigné par sa mission
+ * (attaque des défenses), ou sur la formation terrestre que l'équipage a choisie (appui rapproché).
+ */
 function fireAtSite(s: SimState, u: Unit, p: PlatformPerf): void {
   if (u.kind !== 'fighter' || u.status !== 'airborne' || u.task !== 'attack' || u.asm <= 0 || u.damaged) return;
   if (s.time - u.lastShotAt < s.rules.shotCooldownS) return;
   const m = missionOf(s, u);
-  if (!m || m.type !== 'SEAD' || !m.targetContactId) return;
-  const c = s.contacts[u.side][m.targetContactId];
-  if (!c || !c.identified || (c.kind !== 'sam' && c.kind !== 'ship')) return;
-  // Un bâtiment se déplace : il faut une position fraîche. Un site fixe peut être tiré sur renseignement ancien.
-  if (c.kind === 'ship' && c.stale) return;
+  if (!m) return;
+  const contactId = m.type === 'SEAD' ? m.targetContactId : m.type === 'CAS' ? u.targetContactId : null;
+  if (!contactId) return;
+  const c = s.contacts[u.side][contactId];
+  if (!c || !c.identified || c.kind === null) return;
+  const valid = m.type === 'SEAD' ? c.kind === 'sam' || isSurfaceShip(c.kind) : isGroundForce(c.kind);
+  if (!valid) return;
+  // Ce qui se déplace exige une position fraîche. Un site fixe peut être tiré sur renseignement ancien.
+  if (!c.fixed && c.stale) return;
   const rangeKm = distanceKm(u.pos, c.pos);
   if (rangeKm > p.asmRangeKm * s.rules.fireRangeFraction) return;
   if (inboundOn(s, u, c) >= s.rules.maxShotsPerTarget) return;

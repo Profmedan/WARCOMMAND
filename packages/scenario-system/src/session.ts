@@ -14,15 +14,55 @@ import {
   type SimState,
   type System,
 } from '@warcommand/simulation-core';
-import { AIR_SYSTEMS, applyOrder, type Order, type OrderResult } from '@warcommand/air-operations';
-import { aiDecide } from '@warcommand/ai-commander';
+import { AIR_SYSTEMS, applyOrder, validateOrder } from '@warcommand/air-operations';
+import { applyLandOrder, landSystem, validateLandOrder } from '@warcommand/land-operations';
+import { applyNavalOrder, navalSystem, validateNavalOrder } from '@warcommand/naval-operations';
+import { applyEffectOrder, effectsSystem, validateEffectOrder } from '@warcommand/multi-domain-effects';
+import { aiDecide, type CommanderOrder } from '@warcommand/ai-commander';
 import { objectiveSystem, triggerSystem } from './objectives';
 import { createInitialState, type SetupOptions } from './setup';
 import type { Scenario } from './schema';
 
+/** Ordre de jeu : aérien, terrestre, naval ou multi-domaines. */
+export type GameOrder = CommanderOrder;
+/** Résultat d'un ordre de jeu ; `code` est le motif du refus, propre à chaque composante. */
+export type GameOrderResult = { ok: true; missionId?: string } | { ok: false; code: string; unitId?: string };
+
+/** Vérifie un ordre de jeu sans rien modifier, en le confiant à la composante qui en a la charge. */
+export function validateGameOrder(s: SimState, order: GameOrder): GameOrderResult {
+  switch (order.type) {
+    case 'LAND_ORDER':
+      return validateLandOrder(s, order);
+    case 'LAND_TROOPS':
+      return validateNavalOrder(s, order);
+    case 'USE_EFFECT':
+    case 'SOF_INSERT':
+    case 'SOF_EXTRACT':
+      return validateEffectOrder(s, order);
+    default:
+      return validateOrder(s, order);
+  }
+}
+
+/** Applique un ordre de jeu : la seule porte d'entrée du joueur comme de l'IA. */
+export function applyGameOrder(s: SimState, order: GameOrder): GameOrderResult {
+  switch (order.type) {
+    case 'LAND_ORDER':
+      return applyLandOrder(s, order);
+    case 'LAND_TROOPS':
+      return applyNavalOrder(s, order);
+    case 'USE_EFFECT':
+    case 'SOF_INSERT':
+    case 'SOF_EXTRACT':
+      return applyEffectOrder(s, order);
+    default:
+      return applyOrder(s, order);
+  }
+}
+
 export interface TimedOrder {
   t: number;
-  order: Order;
+  order: GameOrder;
 }
 
 export interface Session {
@@ -50,7 +90,7 @@ export const aiSystem: System = (s) => {
     const orders = aiDecide(picture, mem, () => rand(s.rng, `ai:${side}`));
     for (const order of orders) {
       if (order.side !== side) continue;
-      const result = applyOrder(s, order);
+      const result = applyGameOrder(s, order);
       if (!result.ok) {
         mem.log.push({ t: s.time, level: 'operative', code: 'ORDER_REJECTED', p: { order: order.type, reason: result.code }, utilities: {} });
       }
@@ -62,8 +102,11 @@ export const aiSystem: System = (s) => {
   }
 };
 
-/** Ordre d'application des systèmes à chaque pas. */
-export const SYSTEMS: readonly System[] = [...AIR_SYSTEMS, objectiveSystem, triggerSystem, aiSystem];
+/**
+ * Ordre d'application des systèmes à chaque pas : opérations aériennes (missions, tactique, mouvement,
+ * capteurs, engagement), terrestres, navales, effets multi-domaines, puis objectif, déclencheurs et IA.
+ */
+export const SYSTEMS: readonly System[] = [...AIR_SYSTEMS, landSystem, navalSystem, effectsSystem, objectiveSystem, triggerSystem, aiSystem];
 
 export const DEFAULT_DIFFICULTY: Difficulty = 'standard';
 
@@ -73,6 +116,7 @@ export function createSession(scenario: Scenario, options: Partial<SetupOptions>
     difficulty: options.difficulty ?? scenario.difficulty,
     seed: options.seed ?? scenario.seed,
     wegoTurnMin: options.wegoTurnMin ?? 0,
+    ...(options.versus ? { versus: true } : {}),
   };
   return { scenario, options: full, state: createInitialState(scenario, full), orders: [] };
 }
@@ -88,14 +132,15 @@ export function runToEnd(session: Session): void {
 }
 
 /**
- * Ordre du joueur humain. Refusé s'il vise un camp qui n'est pas le sien :
- * un camp confié à l'IA ne reçoit d'ordres que de l'IA.
+ * Ordre d'un joueur humain. Refusé s'il vise un camp qui n'est pas tenu par un humain :
+ * un camp confié à l'IA ne reçoit d'ordres que de l'IA. À deux joueurs, les deux camps en reçoivent ;
+ * c'est à l'hôte de la partie de vérifier que chacun ne commande que le sien.
  */
-export function issueOrder(session: Session, order: Order): OrderResult {
-  if (order.side !== session.options.playerSide) return { ok: false, code: 'WRONG_SIDE' };
+export function issueOrder(session: Session, order: GameOrder): GameOrderResult {
+  if (!session.options.versus && order.side !== session.options.playerSide) return { ok: false, code: 'WRONG_SIDE' };
   const turn = session.state.wegoTurnS;
   if (turn > 0 && session.state.time % turn !== 0) return { ok: false, code: 'NOT_PLANNING_PHASE' };
-  const result = applyOrder(session.state, order);
+  const result = applyGameOrder(session.state, order);
   if (result.ok) session.orders.push({ t: session.state.time, order: cloneData(order) });
   return result;
 }

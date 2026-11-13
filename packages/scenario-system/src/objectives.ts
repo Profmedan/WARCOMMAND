@@ -16,6 +16,7 @@ import {
   type System,
   type Trigger,
 } from '@warcommand/simulation-core';
+import { groundControl, groundPower, perceivedEnemyGroundPower } from '@warcommand/land-operations';
 
 export function setOutcome(s: SimState, winner: SideId | 'DRAW', reason: Outcome['reason']): void {
   if (s.outcome) return;
@@ -31,12 +32,18 @@ export function setOutcome(s: SimState, winner: SideId | 'DRAW', reason: Outcome
 export const objectiveSystem: System = (s) => {
   const o = s.objective;
   const dt = s.rules.dtS;
+  // Un secteur aérien se dispute par la seule présence de chasseurs ; une zone terrestre revient au camp
+  // dont les formations de mêlée présentes sont nettement les plus fortes.
+  const ground = o.kind === 'ground';
+  const power = ground ? groundPower(s) : { BLUE: 0, RED: 0 };
   const present: Record<SideId, boolean> = { BLUE: false, RED: false };
-  for (const u of Object.values(s.units)) {
-    if (isCombatReadyFighter(u) && distanceKm(u.pos, o.center) <= o.radiusKm) present[u.side] = true;
+  if (!ground) {
+    for (const u of Object.values(s.units)) {
+      if (isCombatReadyFighter(u) && distanceKm(u.pos, o.center) <= o.radiusKm) present[u.side] = true;
+    }
   }
 
-  const status: ControlStatus = controlStatusOf(present.BLUE, present.RED, 'BLUE', o.controller);
+  const status: ControlStatus = ground ? groundControl(s, power.BLUE, power.RED, 'BLUE', o.controller) : controlStatusOf(present.BLUE, present.RED, 'BLUE', o.controller);
   if (status !== 'CONTESTED') o.controller = status;
   if (status !== o.status) {
     o.status = status;
@@ -48,16 +55,20 @@ export const objectiveSystem: System = (s) => {
 
   for (const side of SIDES) {
     let enemySeen = false;
-    for (const c of Object.values(s.contacts[side])) {
-      if (c.stale || c.domain !== 'air' || c.damaged) continue;
-      if (c.identified && c.kind !== 'fighter') continue;
-      if (distanceKm(c.pos, o.center) <= o.radiusKm) {
-        enemySeen = true;
-        break;
+    if (!ground) {
+      for (const c of Object.values(s.contacts[side])) {
+        if (c.stale || c.domain !== 'air' || c.damaged) continue;
+        if (c.identified && c.kind !== 'fighter') continue;
+        if (distanceKm(c.pos, o.center) <= o.radiusKm) {
+          enemySeen = true;
+          break;
+        }
       }
     }
     const p = o.perceived[side];
-    const perceived = controlStatusOf(present[side], enemySeen, side, p.controller);
+    const perceived = ground
+      ? groundControl(s, power[side], perceivedEnemyGroundPower(s, side), side, p.controller)
+      : controlStatusOf(present[side], enemySeen, side, p.controller);
     if (perceived !== 'CONTESTED') p.controller = perceived;
     if (perceived !== p.status) {
       p.status = perceived;

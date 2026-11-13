@@ -670,6 +670,10 @@ export interface Rules {
   casStrengthLoss: number;
   casCohesionLoss: number;
   casMoraleLoss: number;
+  /** Une zone terrestre revient au camp dont la puissance présente vaut au moins ce multiple de celle de l'adversaire. */
+  groundControlRatio: number;
+  /** Durée, en secondes, pendant laquelle une formation adverse perdue de vue reste présumée là où elle a été vue (estimation du contrôle). */
+  groundTrackMemoryS: number;
   // --- Phase 5 : mer ---
   ssmSpeedKmh: number;
   pkBaseSsm: number;

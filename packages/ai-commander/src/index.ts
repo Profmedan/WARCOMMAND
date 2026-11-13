@@ -30,6 +30,15 @@ import {
   type Unit,
 } from '@warcommand/simulation-core';
 import { missionWithinRange, scrambleDelayS, type Order } from '@warcommand/air-operations';
+import type { LandOrder } from '@warcommand/land-operations';
+import type { NavalOrder } from '@warcommand/naval-operations';
+import type { EffectOrder } from '@warcommand/multi-domain-effects';
+import { planJoint } from './joint';
+
+export * from './joint';
+
+/** Tout ordre qu'un commandant — joueur ou IA — peut donner, toutes composantes confondues. */
+export type CommanderOrder = Order | LandOrder | NavalOrder | EffectOrder;
 
 export interface AiTuning {
   /** Amplitude de l'aléa ajouté aux utilités. */
@@ -704,7 +713,7 @@ function planOperations(plan: Plan): void {
  * Cycle de décision de l'IA. `mem` est modifiée (mémoire et journal des décisions) ;
  * les ordres retournés doivent être soumis à `applyOrder`.
  */
-export function aiDecide(pic: SidePicture, mem: AiMemory, random: () => number): Order[] {
+export function aiDecide(pic: SidePicture, mem: AiMemory, random: () => number): CommanderOrder[] {
   if (pic.ended) return [];
   const tuning = AI_TUNING[mem.difficulty];
   const tempo = 1.4 - 0.8 * pic.doctrine.tempo;
@@ -736,10 +745,13 @@ export function aiDecide(pic: SidePicture, mem: AiMemory, random: () => number):
     mem.nextStrategicAt = pic.time + Math.round(tuning.strategicIntervalS * tempo);
   }
 
+  // Composantes terrestre, navale et multi-domaines ; les chasseurs retenus pour l'appui sortent du vivier aérien.
+  const joint = planJoint(pic, mem, (entry) => record(mem, entry));
+
   const orders: Order[] = [];
   if (postureChanged || newLoss || newHostility || pic.time >= mem.nextOperativeAt) {
-    planOperations({ pic, sit, mem, tuning, random, orders, pool: [...sit.freeReady] });
+    planOperations({ pic, sit, mem, tuning, random, orders, pool: sit.freeReady.filter((u) => !joint.reserved.includes(u.id)) });
     mem.nextOperativeAt = pic.time + Math.round(tuning.operativeIntervalS * tempo);
   }
-  return orders;
+  return [...joint.orders, ...orders];
 }

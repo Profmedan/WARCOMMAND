@@ -1,9 +1,10 @@
 'use client';
 
-import type { ReactNode } from 'react';
 import {
   clockZ,
   distanceKm,
+  isGroundForce,
+  isSurfaceShip,
   type ContactView,
   type LatLon,
   type Mission,
@@ -13,10 +14,13 @@ import {
   type SpeedMode,
   type Unit,
 } from '@warcommand/simulation-core';
-import { MISSION_KIND, type MissionEstimate, type Order, type OrderResult } from '@warcommand/air-operations';
+import { MISSION_KIND, type MissionEstimate, type Order } from '@warcommand/air-operations';
+import type { GameOrder, GameOrderResult } from '@warcommand/scenario-system';
 import { GAME_STAT_LABELS, getPlatform, type GameStatKey } from '@warcommand/unit-database';
 import { CLASSIFICATION_LABELS, DOCTRINE_KEY_INFO, DOCTRINE_KEYS, getDoctrine } from '@warcommand/doctrine-engine';
 import type { Selection } from '../world-map/scene';
+import { Bar, Row } from './bits';
+import { EffectsPanel, LandSection, NavalSection, SofSection, type JointTool } from './joint';
 import {
   CONTROL_LABEL,
   DOMAIN_LABEL,
@@ -26,7 +30,7 @@ import {
   MISSION_STATUS_LABEL,
   MISSION_TYPE_HELP,
   MISSION_TYPE_LABEL,
-  REJECT_LABEL,
+  rejectReason,
   ROE_HELP,
   ROE_LABEL,
   RTB_LABEL,
@@ -85,22 +89,29 @@ export function planToOrder(pic: SidePicture, plan: PlanDraft): Order {
   };
 }
 
-export function rejectText(pic: SidePicture, result: OrderResult): string {
+/** Motif d'un refus du moteur, précédé du nom de l'unité en cause quand il y en a une. */
+export function rejectText(pic: SidePicture, result: GameOrderResult, orderType?: string): string {
   if (result.ok) return '';
   const unit = result.unitId ? pic.units.find((u) => u.id === result.unitId) : undefined;
-  return unit ? `${unit.name} : ${REJECT_LABEL[result.code]}` : REJECT_LABEL[result.code];
+  const reason = rejectReason(result.code, orderType);
+  return unit ? `${unit.name} : ${reason}` : reason;
 }
 
 const ROES: Roe[] = ['hold', 'defensive', 'free'];
 const ALTITUDES = [500, 3000, 6000, 7500, 8000, 9000, 11000];
 const DELAYS = [0, 5, 10, 15, 20, 30, 45];
 const WINDOWS = [20, 30, 45, 60];
-const MISSION_TYPES: MissionType[] = ['CAP', 'SWEEP', 'INTERCEPT', 'ESCORT', 'SEAD', 'RECON', 'AEW', 'TANKER'];
-const COMBAT_TYPES: ReadonlySet<MissionType> = new Set<MissionType>(['CAP', 'SWEEP', 'INTERCEPT', 'ESCORT', 'SEAD']);
+const MISSION_TYPES: MissionType[] = ['CAP', 'SWEEP', 'INTERCEPT', 'ESCORT', 'SEAD', 'CAS', 'RECON', 'AEW', 'TANKER'];
+const COMBAT_TYPES: ReadonlySet<MissionType> = new Set<MissionType>(['CAP', 'SWEEP', 'INTERCEPT', 'ESCORT', 'SEAD', 'CAS']);
 
-/** Défenses sol-air connues et identifiées : cibles possibles d'une attaque. */
+/** Une piste est-elle une cible possible d'une attaque (SEAD) : site sol-air ou bâtiment de surface identifié ? */
+export function isStrikeTarget(c: ContactView): boolean {
+  return c.identified && c.kind !== null && (c.kind === 'sam' || isSurfaceShip(c.kind));
+}
+
+/** Défenses sol-air et bâtiments de surface connus et identifiés : cibles possibles d'une attaque. */
 export function siteContacts(pic: SidePicture): ContactView[] {
-  return pic.contacts.filter((c) => c.identified && (c.kind === 'sam' || c.kind === 'ship'));
+  return pic.contacts.filter(isStrikeTarget);
 }
 
 /** Aéronefs amis que l'on peut escorter : en vol, ou affectés à une mission. */
@@ -121,6 +132,8 @@ export function defaultsFor(pic: SidePicture, type: MissionType): Partial<PlanDr
       return { altM: 9000, roe: 'free', targetContactId: pic.contacts.find((c) => c.domain === 'air')?.id ?? null };
     case 'ESCORT':
       return { altM: 9000, roe: pic.defaultRoe, escortUnitId: escortableUnits(pic, [])[0]?.id ?? null };
+    case 'CAS':
+      return { altM: 6000, roe: pic.defaultRoe };
     case 'SWEEP':
       return { altM: 9000, roe: 'free' };
     case 'RECON':
@@ -143,29 +156,12 @@ function isTaskable(u: Unit): boolean {
   return !(u.status === 'airborne' && u.task === 'rtb' && u.rtbReason !== 'order' && u.rtbReason !== 'mission_end');
 }
 
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="kv">
-      <dt>{label}</dt>
-      <dd>{children}</dd>
-    </div>
-  );
-}
-
-function Bar({ value, low = 25 }: { value: number; low?: number }) {
-  return (
-    <span className="bar" role="img" aria-label={`${value} %`}>
-      <span className={value <= low ? 'bar__fill bar__fill--low' : 'bar__fill'} style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
-    </span>
-  );
-}
-
 /* ------------------------------------------------------------------ Planificateur */
 
 interface PlannerProps {
   pic: SidePicture;
   plan: PlanDraft;
-  check: OrderResult;
+  check: GameOrderResult;
   estimate: MissionEstimate | null;
   onChange: (plan: PlanDraft) => void;
   onSubmit: () => void;
@@ -356,7 +352,7 @@ export function Planner({ pic, plan, check, estimate, onChange, onSubmit, onCanc
         <label className="field">
           <span>Emport</span>
           <select className="input" value={plan.loadoutId ?? ''} onChange={(e) => set({ loadoutId: e.target.value || null })}>
-            <option value="">{plan.type === 'SEAD' ? 'Automatique (air-surface)' : 'Automatique (emport en cours)'}</option>
+            <option value="">{plan.type === 'SEAD' || plan.type === 'CAS' ? 'Automatique (air-surface)' : 'Automatique (emport en cours)'}</option>
             {loadouts.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.label} — {l.aam} air-air{l.asm > 0 ? `, ${l.asm} air-surface` : ''}
@@ -436,9 +432,12 @@ interface DetailProps {
   briefing: string;
   onSelect: (selection: Selection) => void;
   onPlan: (seed: Partial<PlanDraft>) => void;
-  onOrder: (order: Order) => void;
+  onOrder: (order: GameOrder) => void;
   onMoveShip: (unitId: string) => void;
   movingShip: string | null;
+  /** Outil de désignation en cours pour une formation, un débarquement ou une équipe spéciale. */
+  jointTool: JointTool | null;
+  onJointTool: (tool: JointTool | null) => void;
 }
 
 function PlatformSheet({ platformId }: { platformId: string }) {
@@ -486,7 +485,8 @@ function PlatformSheet({ platformId }: { platformId: string }) {
   );
 }
 
-function UnitSheet({ pic, unit, onSelect, onPlan, onOrder, onMoveShip, movingShip }: DetailProps & { unit: Unit }) {
+function UnitSheet({ pic, unit, onSelect, onPlan, onOrder, onMoveShip, movingShip, jointTool, onJointTool }: DetailProps & { unit: Unit }) {
+  const joint = { pic, unit, tool: jointTool, onOrder, onTool: onJointTool, onSupport: (at: LatLon) => onPlan({ type: 'CAS', waypoints: [at] }) };
   const p = pic.platforms[unit.platformId];
   const mission = pic.missions.find((m) => m.id === unit.missionId);
   const base = pic.bases.find((b) => b.id === unit.baseId);
@@ -518,8 +518,8 @@ function UnitSheet({ pic, unit, onSelect, onPlan, onOrder, onMoveShip, movingShi
       <dl className="kvlist">
         <Row label="Matériel">{p?.label ?? unit.platformId}</Row>
         <Row label="Groupe">{group?.name ?? '—'}</Row>
-        {base ? <Row label="Base">{base.name}</Row> : null}
-        {unit.status !== 'destroyed' ? <Row label="Activité">{TASK_LABEL[unit.task]}{unit.task === 'rtb' && unit.rtbReason ? ` (${RTB_LABEL[unit.rtbReason]})` : ''}</Row> : null}
+        {base ? <Row label="Base">{base.name}{base.closed ? ' — hors service' : ''}</Row> : null}
+        {unit.status !== 'destroyed' && !unit.land && !unit.sof ? <Row label="Activité">{TASK_LABEL[unit.task]}{unit.task === 'rtb' && unit.rtbReason ? ` (${RTB_LABEL[unit.rtbReason]})` : ''}</Row> : null}
         {isAir && pct !== null ? (
           <Row label="Carburant">
             <Bar value={pct} /> {pct} %
@@ -577,12 +577,19 @@ function UnitSheet({ pic, unit, onSelect, onPlan, onOrder, onMoveShip, movingShi
             Retour à la base
           </button>
         ) : null}
-        {unit.kind === 'ship' && unit.status === 'active' ? (
+        {unit.naval && unit.status === 'active' ? (
           <button type="button" className={`btn${movingShip === unit.id ? ' is-on' : ''}`} aria-pressed={movingShip === unit.id} onClick={() => onMoveShip(unit.id)}>
-            {movingShip === unit.id ? 'Cliquez la destination dans la zone de manœuvre' : 'Déplacer'}
+            {movingShip === unit.id ? 'Cliquez la destination en mer, dans la zone de manœuvre' : 'Déplacer'}
           </button>
         ) : null}
       </div>
+      {unit.status !== 'destroyed' ? (
+        <>
+          <LandSection {...joint} />
+          <NavalSection {...joint} />
+          <SofSection {...joint} />
+        </>
+      ) : null}
       <PlatformSheet platformId={unit.platformId} />
     </div>
   );
@@ -752,20 +759,28 @@ function ContactSheet({ pic, contact, onPlan }: DetailProps & { contact: Contact
             Intercepter
           </button>
         </div>
-      ) : contact.identified && (contact.kind === 'sam' || contact.kind === 'ship') ? (
+      ) : isStrikeTarget(contact) ? (
         <div className="actions">
           <button type="button" className="btn btn--primary" disabled={fighters.length === 0} onClick={() => onPlan({ type: 'SEAD', targetContactId: contact.id })}>
-            Attaquer (SEAD)
+            {contact.kind === 'sam' ? 'Attaquer (SEAD)' : 'Attaquer le bâtiment'}
           </button>
         </div>
+      ) : contact.identified && contact.kind !== null && isGroundForce(contact.kind) ? (
+        <div className="actions">
+          <button type="button" className="btn btn--primary" disabled={fighters.length === 0} onClick={() => onPlan({ type: 'CAS', waypoints: [contact.pos] })}>
+            Appui aérien sur cette formation
+          </button>
+        </div>
+      ) : contact.kind === 'sub' ? (
+        <p className="hint">Un sous-marin ne se combat pas depuis les airs : vos frégates et destroyers l’attaquent d’eux-mêmes s’ils le tiennent au sonar, à moins de 20 km.</p>
       ) : (
-        <p className="hint">Cette piste de surface n’est pas identifiée comme une défense sol-air : elle ne peut pas être désignée à une attaque.</p>
+        <p className="hint">Cette piste n’est pas identifiée : elle ne peut être désignée ni à une attaque, ni à un appui.</p>
       )}
     </div>
   );
 }
 
-function Overview({ pic, briefing, onPlan }: DetailProps) {
+function Overview({ pic, briefing, onPlan, onOrder }: DetailProps) {
   const o = pic.objective;
   const per = o.perceived;
   const isDefender = o.defender === pic.side;
@@ -779,7 +794,8 @@ function Overview({ pic, briefing, onPlan }: DetailProps) {
       <span className={`chip2 chip2--${per.status === 'CONTESTED' ? 'unknown' : per.status === pic.side ? 'active' : 'hostile'}`}>Contrôle estimé : {CONTROL_LABEL[per.status]}</span>
 
       <dl className="kvlist kvlist--spaced">
-        <Row label="Votre rôle">{isDefender ? 'Préserver le contrôle du secteur' : 'Contester le contrôle du secteur'}</Row>
+        <Row label="Votre rôle">{isDefender ? (o.kind === 'ground' ? 'Tenir la zone avec vos formations terrestres' : 'Préserver le contrôle du secteur') : o.kind === 'ground' ? 'Disputer la zone avec vos formations terrestres' : 'Contester le contrôle du secteur'}</Row>
+        {o.kind === 'ground' ? <Row label="Règle">la zone revient au camp dont les formations de mêlée présentes sont nettement les plus fortes ; sinon elle est contestée</Row> : null}
         <Row label="Contrôle du défenseur (estimé)">
           {formatMinutes(defenderSec)} sur {formatMinutes(pic.endTime)}
         </Row>
@@ -789,7 +805,11 @@ function Overview({ pic, briefing, onPlan }: DetailProps) {
       <p className="hint">Estimation fondée sur vos seuls capteurs. Le décompte réel est révélé au compte rendu.</p>
       {pic.bases.map((b) => (
         <p key={b.id} className="muted">
-          Stocks de {b.name} : {b.weaponStock} missiles air-air, {b.asmStock} munitions air-surface.
+          {b.closed
+            ? `${b.name} : hors service.`
+            : b.supplyStock > 0 && b.fuelStockKg <= 0
+              ? `${b.name} : ${Math.round(b.supplyStock)} points de ravitaillement.`
+              : `Stocks de ${b.name} : ${b.weaponStock} missiles air-air, ${b.asmStock} munitions air-surface.`}
         </p>
       ))}
 
@@ -798,6 +818,8 @@ function Overview({ pic, briefing, onPlan }: DetailProps) {
           Nouvelle mission
         </button>
       </div>
+
+      <EffectsPanel pic={pic} onOrder={onOrder} />
 
       <details className="fold" open>
         <summary>Briefing</summary>

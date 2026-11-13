@@ -10,6 +10,7 @@ import {
   destination,
   distanceKm,
   emit,
+  isNaval,
   moveToward,
   rand,
   type LatLon,
@@ -31,6 +32,10 @@ const ESCORT_LEAD_KM = 8;
 const ESCORT_DASH_BEYOND_KM = 40;
 /** Vitesse d'un appareil endommagé, en fraction de la croisière. */
 const DAMAGED_SPEED_FACTOR = 0.85;
+/** Vitesse d'un bâtiment avarié. */
+const DAMAGED_SHIP_SPEED_FACTOR = 0.5;
+/** Fraction de la vitesse de son escorte la plus lente à laquelle navigue un chef de file. */
+const ESCORT_SPEED_MARGIN = 0.9;
 
 function land(s: SimState, u: Unit): void {
   const p = perfOf(s, u);
@@ -152,6 +157,8 @@ function moveAircraft(s: SimState, u: Unit): void {
 
   if (arrived) {
     if (u.task === 'rtb') {
+      // Base fermée : impossible de se poser, l'appareil attend à la verticale (jusqu'à un déroutement ou la panne sèche).
+      if (baseOf(s, u)?.closed) return;
       land(s, u);
       return;
     }
@@ -191,17 +198,29 @@ function moveAircraft(s: SimState, u: Unit): void {
   }
 }
 
+/**
+ * Vitesse d'un bâtiment : la sienne, réduite de moitié s'il est avarié. Un chef de file règle son allure
+ * sur son escorte la plus lente, avec une marge qui lui permet de tenir son poste.
+ */
+function shipSpeedKmh(s: SimState, u: Unit): number {
+  let speed = perfOf(s, u).cruiseKmh;
+  for (const f of Object.values(s.units)) {
+    if (f.naval?.leaderId === u.id && f.status === 'active') speed = Math.min(speed, perfOf(s, f).cruiseKmh * ESCORT_SPEED_MARGIN);
+  }
+  return u.damaged ? speed * DAMAGED_SHIP_SPEED_FACTOR : speed;
+}
+
 function moveShip(s: SimState, u: Unit): void {
   if (u.route.length === 0) {
     u.speedKmh = 0;
     return;
   }
-  const p = perfOf(s, u);
+  const speed = shipSpeedKmh(s, u);
   const target = u.route[u.wpIndex % u.route.length]!;
-  const r = moveToward(u.pos, target, (p.cruiseKmh * s.rules.dtS) / 3600, u.headingDeg);
+  const r = moveToward(u.pos, target, (speed * s.rules.dtS) / 3600, u.headingDeg);
   u.pos = r.pos;
   u.headingDeg = r.headingDeg;
-  u.speedKmh = p.cruiseKmh;
+  u.speedKmh = speed;
   if (!r.arrived) return;
   if (u.routeLoop) {
     u.wpIndex = (u.wpIndex + 1) % u.route.length;
@@ -218,6 +237,6 @@ function moveShip(s: SimState, u: Unit): void {
 export const movementSystem: System = (s) => {
   for (const u of Object.values(s.units)) {
     if (u.status === 'airborne') moveAircraft(s, u);
-    else if (u.status === 'active' && u.kind === 'ship') moveShip(s, u);
+    else if (u.status === 'active' && isNaval(u.kind)) moveShip(s, u);
   }
 };

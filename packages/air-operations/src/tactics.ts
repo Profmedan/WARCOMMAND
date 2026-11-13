@@ -8,8 +8,9 @@
  *   2. dommages → retour base             8. poursuite d'un hostile (règles d'engagement, rayon d'action)
  *   3. plus de mission → retour base      9. interception de la piste désignée
  *   4. carburant « bingo »               10. attaque du site désigné (SEAD)
- *   5. munitions épuisées → retour base  11. escorte de l'appareil protégé
- *   6. repli d'un moyen de soutien       12. tenue de station ou suite de la route
+ *   5. munitions épuisées → retour base  11. appui des troupes au contact (CAS)
+ *   6. repli d'un moyen de soutien       12. escorte de l'appareil protégé
+ *                                        13. tenue de station ou suite de la route
  *
  * L'équipage ne connaît que les pistes de son camp : jamais la vérité-terrain.
  */
@@ -19,6 +20,7 @@ import {
   condition,
   distanceKm,
   emit,
+  isGroundForce,
   selector,
   sequence,
   type BtNode,
@@ -31,6 +33,7 @@ import {
   type Unit,
 } from '@warcommand/simulation-core';
 import { bingoFuelKg, fuelToFlyKg, leashKm, missionOf, orderRtb, perfOf, roeAllows } from './helpers';
+import { isStrikeMission } from './orders';
 
 interface Ctx {
   s: SimState;
@@ -100,7 +103,7 @@ const fuelNode: BtNode<Ctx> = (c) => {
 /** Munitions utiles à la mission épuisées : air-surface pour une attaque, air-air sinon. */
 function outOfOrdnance(c: Ctx): boolean {
   if (c.u.kind !== 'fighter') return false;
-  return c.m?.type === 'SEAD' ? c.u.asm <= 0 : c.u.weapons <= 0;
+  return c.m && isStrikeMission(c.m.type) ? c.u.asm <= 0 : c.u.weapons <= 0;
 }
 
 const evadeNode: BtNode<Ctx> = (c) => {
@@ -229,6 +232,49 @@ const attackNode: BtNode<Ctx> = (c) => {
   return 'success';
 };
 
+/**
+ * Cible d'appui rapproché : une formation terrestre adverse identifiée, à position fraîche, dans le
+ * rayon d'appui de la station — de préférence celle qui est au contact des troupes amies.
+ */
+function casTarget(c: Ctx, m: Mission): Contact | null {
+  const { s, u } = c;
+  const center = centroid(m.waypoints);
+  const engaged = Object.values(s.units).filter((f) => f.side === u.side && f.status === 'active' && f.land?.inContact);
+  let best: Contact | null = null;
+  let bestScore = Infinity;
+  for (const k of Object.values(s.contacts[u.side])) {
+    if (k.domain !== 'ground' || k.stale || !k.identified || k.kind === null || !isGroundForce(k.kind)) continue;
+    const d = distanceKm(center, k.pos);
+    if (d > s.rules.casRadiusKm) continue;
+    const pressing = engaged.some((f) => distanceKm(f.pos, k.pos) <= s.rules.landContactKm + 1);
+    // Les adversaires au contact passent avant tous les autres, quelle que soit la distance.
+    const score = d + (pressing ? 0 : 1e6);
+    if (score < bestScore) {
+      best = k;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+const casNode: BtNode<Ctx> = (c) => {
+  const { u, m } = c;
+  if (!m || m.type !== 'CAS' || m.waypoints.length === 0 || u.asm <= 0) return 'failure';
+  // Pendant le transit, l'équipage ne cherche une cible qu'une fois à distance de tir de sa zone d'appui.
+  if (u.task === 'transit' && distanceKm(u.pos, centroid(m.waypoints)) > c.p.asmRangeKm + c.s.rules.casRadiusKm) return 'failure';
+  const target = casTarget(c, m);
+  if (!target) {
+    if (u.task === 'attack') {
+      u.task = 'station';
+      u.targetContactId = null;
+    }
+    return 'failure';
+  }
+  u.task = 'attack';
+  u.targetContactId = target.id;
+  return 'success';
+};
+
 const escortNode: BtNode<Ctx> = (c) => {
   if (!c.m || c.m.type !== 'ESCORT' || !escortedUnit(c.s, c.m)) return 'failure';
   c.u.task = 'escort';
@@ -269,6 +315,7 @@ const tacticalTree: BtNode<Ctx> = selector(
   pursueNode,
   interceptNode,
   attackNode,
+  casNode,
   escortNode,
   stationNode,
 );

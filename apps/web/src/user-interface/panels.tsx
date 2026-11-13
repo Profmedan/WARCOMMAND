@@ -3,11 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clockZ, type ContactView, type SidePicture, type SimEvent, type Unit } from '@warcommand/simulation-core';
 import type { DomainFilter, LayerToggles, Selection } from '../world-map/scene';
-import { SPEEDS, type Speed } from './controller';
+import { SPEEDS, type NetStatus, type Speed } from './controller';
 import {
   ALERT_CODES,
   CONTROL_LABEL,
   DOMAIN_LABEL,
+  LAND_POSTURE_SHORT,
+  SOF_PHASE_LABEL,
   formatCountdown,
   formatEvent,
   formatMinutes,
@@ -36,17 +38,20 @@ interface TopBarProps {
   turnS: number;
   /** Les ordres sont-ils recevables maintenant ? */
   planning: boolean;
+  /** Partie à deux joueurs : état de la table. */
+  net?: NetStatus | null;
   onSpeed: (speed: Speed) => void;
-  onStep: () => void;
-  onSave: () => void;
-  onExport: () => void;
+  /** Avance d'une minute ; absent quand la simulation ne tourne pas ici. */
+  onStep?: () => void;
+  onSave?: () => void;
+  onExport?: () => void;
   onBriefing: () => void;
   onQuit: () => void;
   quitLabel: string;
   onDebrief: () => void;
 }
 
-export function TopBar({ pic, events, speed, ended, night, turnS, planning, onSpeed, onStep, onSave, onExport, onBriefing, onQuit, quitLabel, onDebrief }: TopBarProps) {
+export function TopBar({ pic, events, speed, ended, night, turnS, planning, net = null, onSpeed, onStep, onSave, onExport, onBriefing, onQuit, quitLabel, onDebrief }: TopBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const fighters = pic.units.filter((u) => u.kind === 'fighter');
   const ready = fighters.filter((u) => u.status === 'ready').length;
@@ -95,12 +100,13 @@ export function TopBar({ pic, events, speed, ended, night, turnS, planning, onSp
               {s === 0 ? 'PAUSE' : `×${s}`}
             </button>
           ))}
-          {turnS === 0 ? (
+          {turnS === 0 && onStep ? (
             <button type="button" className="speed__btn" disabled={ended || speed !== 0} onClick={onStep} title="Avancer d’une minute de simulation">
               +1 min
             </button>
           ) : null}
         </div>
+        {net && !ended ? <NetPill net={net} side={pic.side} /> : null}
         {turnS > 0 && !ended ? (
           <span className={`pill ${planning ? 'pill--plan' : 'pill--run'}`} title="Mode par tours : les ordres se donnent entre deux tours">
             Tour {Math.floor(pic.time / turnS) + 1} · {planning ? 'ordres' : 'résolution'}
@@ -125,12 +131,16 @@ export function TopBar({ pic, events, speed, ended, night, turnS, planning, onSp
               <button type="button" onClick={onBriefing}>
                 Briefing et objectif
               </button>
-              <button type="button" onClick={onSave}>
-                Sauvegarder dans le navigateur
-              </button>
-              <button type="button" onClick={onExport}>
-                Exporter la sauvegarde (.json)
-              </button>
+              {onSave ? (
+                <button type="button" onClick={onSave}>
+                  Sauvegarder dans le navigateur
+                </button>
+              ) : null}
+              {onExport ? (
+                <button type="button" onClick={onExport}>
+                  Exporter la sauvegarde (.json)
+                </button>
+              ) : null}
               {ended ? (
                 <button type="button" onClick={onDebrief}>
                   Compte rendu après action
@@ -144,6 +154,25 @@ export function TopBar({ pic, events, speed, ended, night, turnS, planning, onSp
         </div>
       </div>
     </header>
+  );
+}
+
+/** Partie à deux joueurs : qui est là, et à quelle vitesse la partie avance réellement. */
+function NetPill({ net, side }: { net: NetStatus; side: SidePicture['side'] }) {
+  const other = net.players[side === 'BLUE' ? 'RED' : 'BLUE'];
+  const mine = net.requested[side];
+  const theirs = net.requested[side === 'BLUE' ? 'RED' : 'BLUE'];
+  const label = (v: number) => (v === 0 ? 'pause' : `×${v}`);
+  let text: string;
+  if (!net.online) text = 'hors ligne';
+  else if (!other) text = `code ${net.code} · en attente`;
+  else if (!other.connected) text = `${other.name} déconnecté`;
+  else if (net.effective === 0 && mine > 0) text = `${other.name} demande la pause`;
+  else text = `${other.name} : ${label(theirs)} · partie ${label(net.effective)}`;
+  return (
+    <span className={`pill ${net.online && other?.connected ? 'pill--plan' : 'pill--run'}`} title="Partie à deux joueurs : le temps avance à la plus lente des deux vitesses demandées.">
+      {text}
+    </span>
   );
 }
 
@@ -168,6 +197,7 @@ const LAYER_LABEL: Record<keyof LayerToggles, string> = {
   radar: 'Portées radar',
   weapons: 'Zones sol-air',
   sector: 'Secteur d’objectif',
+  terrain: 'Terrain',
   graticule: 'Graticule',
 };
 
@@ -179,7 +209,12 @@ function unitState(pic: SidePicture, u: Unit): string {
   if ((u.status === 'turnaround' || u.status === 'maintenance') && u.readyAt !== null) {
     return `${u.status === 'maintenance' ? 'réparé' : u.fault ? 'panne, prêt' : 'prêt'} à ${clockZ(pic.startIso, u.readyAt, false)}`;
   }
-  if (u.status === 'active') return u.damaged ? 'hors de combat' : u.suppressedUntil > pic.time ? 'radar coupé' : TASK_LABEL[u.task];
+  if (u.land) {
+    if (u.status === 'embarked') return 'à bord';
+    if (u.status === 'active') return `${u.land.broken ? 'rompue' : u.land.inContact ? 'contact' : LAND_POSTURE_SHORT[u.land.posture]} ${Math.round(u.land.strength * 100)} %`;
+  }
+  if (u.sof && u.status !== 'destroyed') return SOF_PHASE_LABEL[u.sof.phase];
+  if (u.status === 'active') return u.damaged ? (u.naval ? 'avarié' : 'hors de combat') : u.suppressedUntil > pic.time ? 'radar coupé' : TASK_LABEL[u.task];
   return STATUS_LABEL[u.status].toLowerCase();
 }
 

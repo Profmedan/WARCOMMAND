@@ -39,14 +39,35 @@ export function checkInvariants(state: SimState, previous: PositionSnapshot | nu
       if (u.status === 'destroyed' || u.status === 'maintenance') errors.push(`${u.id} : mission attribuée à un appareil indisponible`);
     }
 
+    if (u.land) {
+      const l = u.land;
+      if (!(l.strength >= 0 && l.strength <= 1)) errors.push(`${u.id} : effectifs hors de l'intervalle 0–1 (${l.strength})`);
+      if (!(l.supply >= 0 && l.supply <= 1 + 1e-9)) errors.push(`${u.id} : ravitaillement hors de l'intervalle 0–1 (${l.supply})`);
+      for (const [name, value] of [['moral', l.morale], ['fatigue', l.fatigue], ['cohésion', l.cohesion], ['retranchement', l.dugIn]] as const) {
+        if (!(value >= 0 && value <= 1)) errors.push(`${u.id} : ${name} hors de l'intervalle 0–1 (${value})`);
+      }
+      if (!(l.cargo >= 0 && l.cargo <= p.cargo + 1e-6)) errors.push(`${u.id} : chargement logistique invalide (${l.cargo})`);
+    }
+
+    if (u.naval) {
+      const n = u.naval;
+      if (!(n.hull >= 0 && n.hull <= p.hull)) errors.push(`${u.id} : points de coque invalides (${n.hull})`);
+      if (!(n.ssm >= 0 && n.ssm <= p.ssmCount) || !Number.isInteger(n.ssm)) errors.push(`${u.id} : missiles antinavires invalides (${n.ssm})`);
+      if (!(n.torpedoes >= 0 && n.torpedoes <= p.torpedoCount) || !Number.isInteger(n.torpedoes)) errors.push(`${u.id} : torpilles invalides (${n.torpedoes})`);
+    }
+
     const prev = previous?.[u.id];
     if (prev) {
       const moved = distanceKm(prev.pos, u.pos);
       const maxStep = (Math.max(p.dashKmh, p.cruiseKmh) * dt) / 3600;
-      if (moved > maxStep * 1.001 + 1e-6) {
+      // Une unité hors carte (troupe à bord, équipe en infiltration) ou posée sur un pont d'envol suit son
+      // transport : sa position n'est pas la sienne.
+      const onDeck = u.status !== 'airborne' && u.baseId !== null && (state.bases[u.baseId]?.hostUnitId ?? null) !== null;
+      const carried = prev.status === 'embarked' || u.status === 'embarked' || onDeck;
+      if (!carried && moved > maxStep * 1.001 + 1e-6) {
         errors.push(`${u.id} : téléportation (${moved.toFixed(3)} km en ${dt} s, maximum ${maxStep.toFixed(3)} km)`);
       }
-      if ((prev.status === 'destroyed' || prev.status === 'maintenance') && moved > 1e-9) {
+      if ((prev.status === 'destroyed' || prev.status === 'maintenance') && moved > 1e-9 && !(onDeck && u.status !== 'destroyed')) {
         errors.push(`${u.id} : unité hors service en mouvement`);
       }
       if (prev.status === 'destroyed' && u.status !== 'destroyed') errors.push(`${u.id} : unité détruite revenue en service`);
@@ -56,6 +77,7 @@ export function checkInvariants(state: SimState, previous: PositionSnapshot | nu
   for (const b of Object.values(state.bases)) {
     if (b.weaponStock < 0) errors.push(`${b.id} : stock de munitions négatif`);
     if (b.fuelStockKg < 0) errors.push(`${b.id} : stock de carburant négatif`);
+    if (b.supplyStock < 0) errors.push(`${b.id} : stock de ravitaillement négatif`);
   }
 
   for (const s of state.shots) {

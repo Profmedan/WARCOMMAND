@@ -86,6 +86,8 @@ export const DEFAULT_RULES: Rules = {
   casStrengthLoss: 0.1,
   casCohesionLoss: 0.12,
   casMoraleLoss: 0.08,
+  groundControlRatio: 1.5,
+  groundTrackMemoryS: 600,
   // --- Phase 5 : mer ---
   ssmSpeedKmh: 900,
   pkBaseSsm: 0.6,

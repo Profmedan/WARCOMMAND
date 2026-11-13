@@ -140,6 +140,12 @@ export function jointInput(): ScenarioInput {
   };
 }
 
+/** Ne garde que les unités nommées (et les bases qui ne dépendent pas d'un bâtiment retiré). */
+export function keep(sc: ScenarioInput, ids: string[]): void {
+  sc.units = sc.units.filter((u) => ids.includes(u.id));
+  sc.bases = sc.bases.filter((b) => b.hostUnitId === undefined || ids.includes(b.hostUnitId));
+}
+
 /** Charge le scénario d'essai, éventuellement modifié. Les deux camps sont confiés au joueur des tests : aucune IA ne décide. */
 export function jointState(mutate?: (sc: ScenarioInput) => void, seed = 11): SimState {
   const input = jointInput();

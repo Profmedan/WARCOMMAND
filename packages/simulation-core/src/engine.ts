@@ -1,4 +1,4 @@
-import type { EventCode, SideId, SimEvent, SimState } from './types';
+import type { EventCode, Shot, SideId, SimEvent, SimState } from './types';
 
 /** Un système applique une famille de règles à l'état, pour un pas de temps. */
 export type System = (state: SimState) => void;
@@ -10,6 +10,26 @@ export function emit(
   p: Record<string, string | number> = {},
 ): void {
   state.events.push({ t: state.time, code, vis: [...vis], p });
+}
+
+/**
+ * Faits d'un tir consignés à sa résolution. L'événement n'est visible que de l'arbitre : il peut porter les
+ * identifiants de vérité-terrain dont l'analyse après action a besoin.
+ */
+export function shotFacts(shot: Shot, targetName: string): Record<string, string | number> {
+  return {
+    shot: shot.id,
+    side: shot.side,
+    shooter: shot.shooterName,
+    shooterId: shot.shooterId,
+    target: targetName,
+    targetId: shot.targetId,
+    weapon: shot.weapon,
+    firedAt: shot.firedAt,
+    rangeKm: Math.round(shot.launchRangeKm),
+    maxKm: Math.round(shot.maxRangeKm),
+    aware: shot.targetAware ? 1 : 0,
+  };
 }
 
 /**

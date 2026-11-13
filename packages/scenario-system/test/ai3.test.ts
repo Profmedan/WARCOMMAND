@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { cloneData, getSidePicture, type AiMemory, type SidePicture } from '@warcommand/simulation-core';
-import { applyOrder, observe, validateOrder, type Order } from '@warcommand/air-operations';
-import { aiDecide, createAiMemory } from '@warcommand/ai-commander';
-import { BRECHE_BOREALE, createInitialState } from '../src/index';
+import { observe } from '@warcommand/air-operations';
+import { aiDecide, createAiMemory, type CommanderOrder } from '@warcommand/ai-commander';
+import { applyGameOrder, BRECHE_BOREALE, createInitialState, validateGameOrder } from '../src/index';
 import { freshState } from './helpers';
 
 const decide = (pic: SidePicture, mem: AiMemory) => aiDecide(cloneData(pic), mem, () => 0.5);
-const missions = (orders: Order[], type: string) => orders.flatMap((o) => (o.type === 'CREATE_MISSION' && o.draft.type === type ? [o.draft] : []));
+const missions = (orders: CommanderOrder[], type: string) => orders.flatMap((o) => (o.type === 'CREATE_MISSION' && o.draft.type === type ? [o.draft] : []));
 
 describe('IA : missions de la phase 3', () => {
   it('attaque une défense sol-air connue qui couvre le secteur, si elle a des munitions air-surface', () => {
@@ -21,7 +21,7 @@ describe('IA : missions de la phase 3', () => {
     expect(sead[0]!.unitIds).toHaveLength(2);
     // Il reste des chasseurs pour disputer le secteur.
     expect(missions(orders, 'CAP').flatMap((d) => d.unitIds).length).toBeGreaterThanOrEqual(2);
-    for (const o of orders) expect(validateOrder(s, o).ok).toBe(true);
+    for (const o of orders) expect(validateGameOrder(s, o).ok).toBe(true);
     expect(mem.log.some((d) => d.code === 'LAUNCH_SEAD')).toBe(true);
 
     // Elle ne relance pas aussitôt une seconde attaque sur la même cible.
@@ -56,7 +56,7 @@ describe('IA : missions de la phase 3', () => {
     expect(escort[0]).toMatchObject({ escortUnitId: 'blue-awacs' });
     expect(escort[0]!.unitIds).toHaveLength(2);
     expect(missions(orders, 'INTERCEPT')).toHaveLength(0);
-    for (const o of orders) expect(validateOrder(s, o).ok).toBe(true);
+    for (const o of orders) expect(validateGameOrder(s, o).ok).toBe(true);
   });
 
   it('au niveau vétéran, patrouille en silence radar quand son avion-radar couvre la station ; pas au niveau standard', () => {
@@ -89,7 +89,7 @@ describe('IA : missions de la phase 3', () => {
     expect(missions(first, 'SEAD').length).toBeGreaterThan(0);
     expect(missions(first, 'CAP')).toHaveLength(0);
     expect(mem.log.some((d) => d.code === 'HOLD_FOR_SEAD')).toBe(true);
-    for (const o of first) expect(applyOrder(s, o).ok).toBe(true);
+    for (const o of first) expect(applyGameOrder(s, o).ok).toBe(true);
 
     // Tant que l'attaque est en cours, elle patiente — et n'en lance pas une seconde.
     expect(missions(first, 'SEAD')).toHaveLength(1);
@@ -97,7 +97,7 @@ describe('IA : missions de la phase 3', () => {
     const during = decide(getSidePicture(s, 'BLUE'), mem);
     expect(missions(during, 'CAP')).toHaveLength(0);
     expect(missions(during, 'SEAD')).toHaveLength(0);
-    for (const o of during) expect(applyOrder(s, o).ok).toBe(true);
+    for (const o of during) expect(applyGameOrder(s, o).ok).toBe(true);
 
     // L'attaque terminée, elle installe sa patrouille.
     for (const m of Object.values(s.missions)) {
@@ -108,7 +108,7 @@ describe('IA : missions de la phase 3', () => {
     s.time += 120;
     const after = decide(getSidePicture(s, 'BLUE'), mem);
     expect(missions(after, 'CAP').length).toBeGreaterThan(0);
-    for (const o of after) expect(applyOrder(s, o).ok).toBe(true);
+    for (const o of after) expect(applyGameOrder(s, o).ok).toBe(true);
 
     // Elle n'attend qu'une fois : une nouvelle attaque ne suspend plus les patrouilles suivantes.
     for (const m of Object.values(s.missions)) {
@@ -137,7 +137,7 @@ describe('IA : missions de la phase 3', () => {
     expect(escort[0]!.launchAt).toBeGreaterThanOrEqual(s.time + s.rules.rearmDelayS);
     const engaged = new Set([...sead[0]!.unitIds, ...escort[0]!.unitIds]);
     expect(engaged.size).toBe(4);
-    for (const o of orders) expect(applyOrder(s, o).ok).toBe(true);
+    for (const o of orders) expect(applyGameOrder(s, o).ok).toBe(true);
     expect(Object.values(s.units).filter((u) => u.side === 'BLUE' && u.kind === 'fighter' && u.missionId === null)).toHaveLength(2);
   });
 
@@ -166,7 +166,7 @@ describe('IA : missions de la phase 3', () => {
     const s = threatened();
     const mem = createAiMemory('defender', 'standard');
     const first = decide(getSidePicture(s, 'BLUE'), mem);
-    for (const o of first) expect(applyOrder(s, o).ok).toBe(true);
+    for (const o of first) expect(applyGameOrder(s, o).ok).toBe(true);
     s.time += 700;
     Object.values(s.contacts.BLUE).forEach((c) => {
       c.lastSeen = s.time;

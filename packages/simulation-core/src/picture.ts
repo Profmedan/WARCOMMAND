@@ -13,15 +13,19 @@ import {
   type ControlStatus,
   type DoctrineParams,
   type Domain,
+  type EffectId,
   type Group,
   type Mission,
   type PerceivedControl,
   type PlatformPerf,
   type Roe,
   type Rules,
+  type SatellitePass,
   type ShotWeapon,
   type SideId,
+  type SideServices,
   type SimState,
+  type TerrainZone,
   type Unit,
   type UnitKind,
 } from './types';
@@ -66,6 +70,7 @@ export interface ShotView {
 export interface ObjectiveView {
   id: string;
   name: string;
+  kind: 'air' | 'ground';
   center: LatLon;
   radiusKm: number;
   defender: SideId;
@@ -98,6 +103,14 @@ export interface SidePicture {
   navalZone: Circle | null;
   theater: Bounds;
   ended: boolean;
+  /** Terrain du théâtre : une donnée géographique, connue des deux camps. */
+  terrain: TerrainZone[];
+  /** Services du camp (réseaux, liaisons et navigation par satellite) — jamais ceux de l'adversaire. */
+  services: SideServices;
+  /** Effets multi-domaines encore disponibles pour le camp. */
+  effects: Record<EffectId, number>;
+  /** Fenêtres des satellites d'observation du camp. */
+  satellites: SatellitePass[];
 }
 
 export function contactView(state: SimState, c: Contact): ContactView {
@@ -141,8 +154,10 @@ export function getSidePicture(state: SimState, side: SideId): SidePicture {
     units: Object.values(state.units).filter((u) => u.side === side),
     missions: Object.values(state.missions).filter((m) => m.side === side),
     bases: Object.values(state.bases).filter((b) => b.side === side),
+    // Les bases fixes adverses figurent au dossier de renseignement ; un pont d'envol ou un dépôt flottant, non :
+    // ils révéleraient la position d'un bâtiment.
     enemyBases: Object.values(state.bases)
-      .filter((b) => b.side === enemy)
+      .filter((b) => b.side === enemy && b.hostUnitId === null)
       .map((b) => ({ name: b.name, pos: { lat: b.pos.lat, lon: b.pos.lon } })),
     contacts: Object.values(state.contacts[side]).map((c) => contactView(state, c)),
     shots: state.shots
@@ -158,6 +173,7 @@ export function getSidePicture(state: SimState, side: SideId): SidePicture {
     objective: {
       id: o.id,
       name: o.name,
+      kind: o.kind,
       center: o.center,
       radiusKm: o.radiusKm,
       defender: o.defender,
@@ -172,6 +188,10 @@ export function getSidePicture(state: SimState, side: SideId): SidePicture {
     navalZone: state.navalZones[side],
     theater: state.theater,
     ended: state.outcome !== null,
+    terrain: state.terrain,
+    services: state.services[side],
+    effects: state.effects[side],
+    satellites: state.satellites.filter((p) => p.side === side),
   };
 }
 

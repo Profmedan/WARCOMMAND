@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { cloneData, getSidePicture, rand, type AiMemory, type SidePicture } from '@warcommand/simulation-core';
-import { validateOrder } from '@warcommand/air-operations';
 import { aiDecide, createAiMemory, INITIAL_ASSESSMENT_S } from '@warcommand/ai-commander';
-import { BOUCLIER_ATLANTIQUE, createSession, runToEnd, stepSession } from '../src/index';
+import { BOUCLIER_ATLANTIQUE, createSession, runToEnd, stepSession, validateGameOrder } from '../src/index';
 import { freshState } from './helpers';
 
 const fixed = (value: number) => () => value;
@@ -49,7 +48,7 @@ describe('IA adverse', () => {
     expect(orders.length).toBeGreaterThan(0);
     for (const order of orders) {
       expect(order.side).toBe('RED');
-      expect(validateOrder(s, order).ok).toBe(true);
+      expect(validateGameOrder(s, order).ok).toBe(true);
     }
   });
 

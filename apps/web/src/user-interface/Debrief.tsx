@@ -1,32 +1,39 @@
 'use client';
 
 /**
- * Compte rendu après action et mode observateur.
+ * Compte rendu après action : bilan, analyse des opérations, rejeu détaillé, tirs, décisions de l'IA, journal.
  *
  * C'est le seul écran qui montre la vérité-terrain des deux camps : il n'est accessible
  * qu'une fois la mission terminée.
  */
-import { useEffect, useMemo, useState } from 'react';
-import { clockZ, SIDES, type ControlStatus, type SideId, type SimState } from '@warcommand/simulation-core';
-import { buildAar, createReplayCursor, recordingOf, type ReplayCursor } from '@warcommand/replay-engine';
-import { MapView } from '../world-map/MapView';
-import { ALL_DOMAINS, boundsOf, DEFAULT_LAYERS, sceneFromTruth } from '../world-map/scene';
-import { downloadJson, type GameController } from './controller';
-import { CONTROL_LABEL, describeAiDecision, formatEvent, formatMinutes, POSTURE_LABEL, RESULT_LABEL, SIDE_LABEL, STATUS_LABEL, WEAPON_LABEL } from './i18n';
+import { useMemo, useState } from 'react';
+import { clockZ, GROUND_FORCE_KINDS, NAVAL_KINDS, SIDES, type ControlStatus, type SideId, type UnitKind } from '@warcommand/simulation-core';
+import type { Session } from '@warcommand/scenario-system';
+import { buildAar, recordingOf, type AarUnit } from '@warcommand/replay-engine';
+import { Analysis } from './Analysis';
+import { downloadJson } from './controller';
+import { CONTROL_LABEL, describeAiDecision, formatEvent, formatMinutes, POSTURE_LABEL, RESULT_LABEL, SIDE_LABEL, SOF_PHASE_LABEL, STATUS_LABEL, WEAPON_LABEL } from './i18n';
+import { Replay } from './Replay';
 
 interface Props {
-  controller: GameController;
-  onBack: () => void;
+  /** Partie terminée, vérité-terrain comprise. */
+  session: Session;
+  /** Camp que tenait le joueur ; `null` pour une partie entre IA ou un enregistrement revu en spectateur. */
+  playerSide: SideId | null;
+  /** Retour à la carte finale ; absent quand il n'y a pas d'écran de jeu derrière. */
+  onBack?: () => void;
   onQuit: () => void;
   quitLabel: string;
-  onRestart: (seed: number) => void;
+  /** Rejouer la mission ; absent en campagne, à deux joueurs et pour un enregistrement revu. */
+  onRestart?: (seed: number) => void;
 }
 
-type Tab = 'bilan' | 'observateur' | 'tirs' | 'ia' | 'journal';
+type Tab = 'bilan' | 'analyse' | 'rejeu' | 'tirs' | 'ia' | 'journal';
 
 const TABS: [Tab, string][] = [
   ['bilan', 'Bilan'],
-  ['observateur', 'Observateur'],
+  ['analyse', 'Analyse'],
+  ['rejeu', 'Rejeu'],
   ['tirs', 'Tirs'],
   ['ia', 'Décisions de l’IA'],
   ['journal', 'Journal complet'],
@@ -35,74 +42,32 @@ const TABS: [Tab, string][] = [
 const tone = (s: ControlStatus) => (s === 'BLUE' ? 'blue' : s === 'RED' ? 'red' : 'amber');
 const tons = (kg: number) => `${(kg / 1000).toFixed(1).replace('.', ',')} t`;
 const REASON: Record<string, string> = { time: 'fin de la période', attrition: 'attrition', trigger: 'événement de scénario' };
-const LEVEL: Record<string, string> = { major: 'victoire majeure', minor: 'victoire mineure', draw: 'résultat indécis' };
+const LEVEL: Record<string, string> = { major: 'Victoire majeure', minor: 'Victoire mineure', draw: 'Résultat indécis' };
+const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
-function Observer({ controller }: { controller: GameController }) {
-  const [cursor, setCursor] = useState<ReplayCursor | null>(null);
-  const [t, setT] = useState(controller.time);
-  const [playing, setPlaying] = useState(false);
-  const scenario = controller.session.scenario;
-  const startIso = controller.session.state.startIso;
-
-  // La préparation re-simule toute la partie : on la diffère pour laisser l'écran s'afficher.
-  useEffect(() => {
-    const id = setTimeout(() => setCursor(createReplayCursor(recordingOf(controller.session))), 30);
-    return () => clearTimeout(id);
-  }, [controller]);
-
-  useEffect(() => {
-    if (!playing || !cursor) return;
-    const id = setInterval(() => {
-      setT((v) => {
-        if (v >= cursor.endTime) {
-          setPlaying(false);
-          return v;
-        }
-        return Math.min(cursor.endTime, v + 20);
-      });
-    }, 100);
-    return () => clearInterval(id);
-  }, [playing, cursor]);
-
-  const fit = useMemo(() => boundsOf([...scenario.bases.map((b) => b.pos), scenario.objective.center]), [scenario]);
-  const state: SimState | null = useMemo(() => (cursor ? cursor.stateAt(t) : null), [cursor, t]);
-  const scene = useMemo(() => (state ? sceneFromTruth(state, { layers: DEFAULT_LAYERS, domains: ALL_DOMAINS }) : null), [state]);
-
-  if (!cursor || !state || !scene) return <p className="muted">Préparation du rejeu : la partie est re-simulée à partir de la graine et de vos ordres…</p>;
-
-  const o = state.objective;
-  return (
-    <div className="observer">
-      <div className="observer__bar">
-        <button type="button" className="btn" onClick={() => (t >= cursor.endTime ? (setT(0), setPlaying(true)) : setPlaying((p) => !p))}>
-          {playing ? 'Pause' : t >= cursor.endTime ? 'Revoir depuis le début' : 'Lecture'}
-        </button>
-        <input type="range" min={0} max={cursor.endTime} step={10} value={t} onChange={(e) => setT(Number(e.target.value))} aria-label="Instant observé" />
-        <strong>{clockZ(startIso, t)} Z</strong>
-        <span>
-          Contrôle réel : <b className={`txt--${tone(o.status)}`}>{CONTROL_LABEL[o.status]}</b> · BLEU {formatMinutes(o.sec.BLUE)} · ROUGE {formatMinutes(o.sec.RED)} · contesté {formatMinutes(o.sec.CONTESTED)}
-        </span>
-      </div>
-      <div className="observer__map">
-        <MapView scene={scene} view={{ center: scenario.region.center, zoom: scenario.region.zoom }} fit={fit} picking={false} showGraticule />
-      </div>
-      <p className="muted">Vérité-terrain des deux camps, reconstituée par re-simulation déterministe : aucune position n’est enregistrée, tout est recalculé.</p>
-    </div>
-  );
+/** État final d'une unité : son statut, précisé par ce qui lui est propre (effectifs, coque, phase). */
+function finalState(u: AarUnit): string {
+  if (u.status === 'destroyed') return u.strengthPct !== null ? 'Détruite' : u.sofPhase !== null ? 'Perdue' : STATUS_LABEL.destroyed;
+  if (u.sofPhase !== null) return capital(SOF_PHASE_LABEL[u.sofPhase]);
+  if (u.strengthPct !== null) return `${u.status === 'embarked' ? 'À bord' : STATUS_LABEL[u.status]} · effectifs ${u.strengthPct} %`;
+  if (u.hull !== null) return `${STATUS_LABEL[u.status]} · coque ${u.hull.left}/${u.hull.of}`;
+  return `${STATUS_LABEL[u.status]}${u.damaged && u.status !== 'maintenance' ? ' · endommagé' : ''}`;
 }
 
-export function Debrief({ controller, onBack, onQuit, quitLabel, onRestart }: Props) {
-  const state = controller.session.state;
+export function Debrief({ session, playerSide, onBack, onQuit, quitLabel, onRestart }: Props) {
+  const state = session.state;
   const aar = useMemo(() => buildAar(state), [state]);
   const [tab, setTab] = useState<Tab>('bilan');
   const outcome = aar.outcome;
-  const player = controller.playerSide;
+  const player = playerSide;
   const ctx = { startIso: state.startIso, sectorName: state.objective.name };
   const at = (t: number) => clockZ(state.startIso, t);
 
   const headline = !outcome ? 'Mission en cours' : outcome.winner === 'DRAW' ? 'Résultat indécis' : `Victoire ${SIDE_LABEL[outcome.winner] === 'BLEU' ? 'BLEUE' : 'ROUGE'}`;
-  const verdict = !outcome ? '' : outcome.winner === 'DRAW' ? 'Aucun camp n’atteint son seuil.' : outcome.winner === player ? 'Vous l’emportez.' : 'Vous êtes battu.';
+  const verdict = !outcome ? '' : outcome.winner === 'DRAW' ? 'Aucun camp n’atteint son seuil.' : player === null ? '' : outcome.winner === player ? 'Vous l’emportez.' : 'Vous êtes battu.';
   const total = Math.max(1, aar.elapsedSec);
+  const lost = (s: SideId, kinds: readonly UnitKind[]) => kinds.reduce((n, kind) => n + aar.sides[s].stats.losses[kind], 0);
+  const present = (kinds: readonly UnitKind[]) => SIDES.some((s) => aar.sides[s].units.some((u) => kinds.includes(u.kind)));
   const rows: [string, (s: SideId) => string | number][] = [
     ['Sorties', (s) => aar.sides[s].stats.sorties],
     ['Tirs', (s) => aar.sides[s].stats.shotsFired],
@@ -110,40 +75,61 @@ export function Debrief({ controller, onBack, onQuit, quitLabel, onRestart }: Pr
     ['Coups au but', (s) => aar.sides[s].stats.hits],
     ['Destructions obtenues', (s) => aar.sides[s].stats.kills],
     ['Chasseurs perdus', (s) => aar.sides[s].stats.losses.fighter],
-    ['Autres pertes', (s) => aar.sides[s].stats.losses.aew + aar.sides[s].stats.losses.tanker + aar.sides[s].stats.losses.drone + aar.sides[s].stats.losses.ship + aar.sides[s].stats.losses.sam],
+    ['Autres appareils et sites sol-air perdus', (s) => lost(s, ['aew', 'tanker', 'drone', 'sam'])],
     ['Appareils endommagés', (s) => aar.sides[s].stats.damaged],
     ['Carburant consommé', (s) => tons(aar.sides[s].stats.fuelBurnedKg)],
     ['Carburant ravitaillé en vol', (s) => tons(aar.sides[s].stats.fuelTransferredKg)],
-    ['Commandement', (s) => (aar.sides[s].controlledByAi ? 'IA' : 'Vous')],
   ];
+  // Les lignes terrestres, navales et multi-domaines n'apparaissent que si le scénario engage ces composantes.
+  if (present(GROUND_FORCE_KINDS)) {
+    rows.push(
+      ['Formations terrestres détruites', (s) => lost(s, GROUND_FORCE_KINDS)],
+      ['Effectifs perdus à terre', (s) => `${aar.sides[s].stats.landStrengthLost.toFixed(1).replace('.', ',')} formation`],
+    );
+  }
+  if (present(NAVAL_KINDS)) {
+    rows.push(
+      ['Bâtiments perdus', (s) => lost(s, NAVAL_KINDS)],
+      ['Missiles antinavires tirés', (s) => aar.sides[s].stats.ssmFired],
+      ['Torpilles tirées', (s) => aar.sides[s].stats.torpedoesFired],
+    );
+  }
+  if (SIDES.some((s) => aar.sides[s].stats.effectsUsed > 0)) rows.push(['Effets multi-domaines employés', (s) => aar.sides[s].stats.effectsUsed]);
+  rows.push(['Commandement', (s) => (aar.sides[s].controlledByAi ? 'IA' : s === player ? 'Vous' : player === null ? 'Joueur' : 'Votre adversaire')]);
 
   return (
     <div className="debrief">
       <header className="debrief__head">
         <div>
-          <p className="sheet__eyebrow">Compte rendu après action · {controller.session.scenario.title}</p>
+          <p className="sheet__eyebrow">Compte rendu après action · {session.scenario.title}</p>
           <h1 className={outcome && outcome.winner !== 'DRAW' ? `txt--${tone(outcome.winner)}` : ''}>{headline}</h1>
           <p>
             {verdict} {outcome ? `${LEVEL[outcome.level]} · ${REASON[outcome.reason]} à ${at(outcome.endedAt)} Z` : ''}
           </p>
         </div>
         <div className="debrief__actions">
-          <button type="button" className="btn btn--primary" onClick={() => onRestart(state.seed)}>
-            Rejouer (même graine)
-          </button>
-          <button type="button" className="btn" onClick={() => onRestart(Math.floor(Math.random() * 1_000_000_000))}>
-            Rejouer (nouvelle graine)
-          </button>
+          {onRestart ? (
+            <>
+              <button type="button" className="btn btn--primary" onClick={() => onRestart(state.seed)}>
+                Rejouer (même graine)
+              </button>
+              <button type="button" className="btn" onClick={() => onRestart(Math.floor(Math.random() * 1_000_000_000))}>
+                Rejouer (nouvelle graine)
+              </button>
+            </>
+          ) : null}
           <button type="button" className="btn" onClick={() => downloadJson(`war-command-compte-rendu-${state.seed}.json`, aar)}>
             Exporter le compte rendu
           </button>
-          <button type="button" className="btn" onClick={() => downloadJson(`war-command-enregistrement-${state.seed}.json`, recordingOf(controller.session))}>
+          <button type="button" className="btn" onClick={() => downloadJson(`war-command-enregistrement-${state.seed}.json`, recordingOf(session))} title="Fichier à relire plus tard depuis le menu : « Revoir un enregistrement »">
             Exporter l’enregistrement
           </button>
-          <button type="button" className="btn" onClick={onBack}>
-            Revoir la carte finale
-          </button>
-          <button type="button" className="btn btn--ghost" onClick={onQuit}>
+          {onBack ? (
+            <button type="button" className="btn" onClick={onBack}>
+              Revoir la carte finale
+            </button>
+          ) : null}
+          <button type="button" className={`btn${onRestart ? ' btn--ghost' : ' btn--primary'}`} onClick={onQuit}>
             {quitLabel}
           </button>
         </div>
@@ -181,10 +167,12 @@ export function Debrief({ controller, onBack, onQuit, quitLabel, onRestart }: Pr
                 Seuils : le défenseur ({SIDE_LABEL[aar.defender]}) l’emporte à partir de {formatMinutes(aar.defenderWinsAtSec)} de contrôle ; le challenger
                 l’emporte si le défenseur en totalise moins de {formatMinutes(aar.challengerWinsBelowSec)}.
               </p>
-              <p className="muted">
-                Pendant la partie, vos capteurs vous donnaient : BLEU {formatMinutes(aar.sides[player].perceivedSec.BLUE)} · ROUGE{' '}
-                {formatMinutes(aar.sides[player].perceivedSec.RED)} · contesté {formatMinutes(aar.sides[player].perceivedSec.CONTESTED)}.
-              </p>
+              {player ? (
+                <p className="muted">
+                  Pendant la partie, vos capteurs vous donnaient : BLEU {formatMinutes(aar.sides[player].perceivedSec.BLUE)} · ROUGE{' '}
+                  {formatMinutes(aar.sides[player].perceivedSec.RED)} · contesté {formatMinutes(aar.sides[player].perceivedSec.CONTESTED)}.
+                </p>
+              ) : null}
             </section>
 
             <section className="card">
@@ -232,12 +220,9 @@ export function Debrief({ controller, onBack, onQuit, quitLabel, onRestart }: Pr
                         <tr key={u.name} className={u.status === 'destroyed' ? 'is-done' : ''}>
                           <td>{u.name}</td>
                           <td>{u.platform}</td>
-                          <td>
-                            {STATUS_LABEL[u.status]}
-                            {u.damaged && u.status !== 'destroyed' && u.status !== 'maintenance' ? ' · endommagé' : ''}
-                          </td>
+                          <td>{finalState(u)}</td>
                           <td>{u.fuelPct === null ? '—' : `${u.fuelPct} %`}</td>
-                          <td>{u.weapons}</td>
+                          <td>{u.strengthPct !== null || u.sofPhase !== null ? '—' : u.weapons}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -251,9 +236,11 @@ export function Debrief({ controller, onBack, onQuit, quitLabel, onRestart }: Pr
           </>
         ) : null}
 
-        {tab === 'observateur' ? (
+        {tab === 'analyse' ? <Analysis session={session} /> : null}
+
+        {tab === 'rejeu' ? (
           <section className="card card--wide">
-            <Observer controller={controller} />
+            <Replay session={session} />
           </section>
         ) : null}
 

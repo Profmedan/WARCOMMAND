@@ -52,7 +52,8 @@ export function nightNow(s: SimState): boolean {
  * (radar coupé, hors portée, sous l'horizon, hors secteur), sinon distance / portée efficace dans ]0, 1].
  */
 export function detectionRatio(s: SimState, observer: Unit, target: Unit): number {
-  if (!radarEmitting(s, observer) || target.domain === 'ground') return 0;
+  // Un radar ne voit ni ce qui est au sol, ni un sous-marin en plongée.
+  if (!radarEmitting(s, observer) || target.domain === 'ground' || target.kind === 'sub') return 0;
   const p = perfOf(s, observer);
   const d = distanceKm(observer.pos, target.pos);
   const signature = perfOf(s, target).signature;
@@ -139,7 +140,8 @@ export function observe(s: SimState, side: SideId, target: Unit, identify: boole
   c.stale = false;
   c.source = source;
   if (source === 'radar') c.radarSeenAt = s.time;
-  if (target.domain === 'ground') c.fixed = true;
+  // Seul un site sol-air est un site fixe ; une formation terrestre se déplace, sa piste vieillit et se perd.
+  if (target.kind === 'sam') c.fixed = true;
   if (identify && !c.identified) {
     c.identified = true;
     c.idProgress = 1;
@@ -189,7 +191,8 @@ function sweep(s: SimState, side: SideId, night: boolean): void {
       continue;
     }
     // 3. Optronique : unités de surface et au sol.
-    if (target.domain !== 'air' && own.some((o) => canSeeSurface(s, o, target.pos, night)) && rand(s.rng, 'sim') < s.rules.eoDetectP) {
+    const hidden = target.kind === 'sub' || target.kind === 'sof';
+    if (target.domain !== 'air' && !hidden && own.some((o) => canSeeSurface(s, o, target.pos, night)) && rand(s.rng, 'sim') < s.rules.eoDetectP) {
       observe(s, side, target, true, 'eo');
     }
   }

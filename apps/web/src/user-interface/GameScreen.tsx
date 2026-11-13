@@ -1,33 +1,52 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { clockZ, destination, distanceKm, type LatLon } from '@warcommand/simulation-core';
-import type { Order } from '@warcommand/air-operations';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { clockZ, distanceKm, type LatLon } from '@warcommand/simulation-core';
+import type { GameOrder, GameOrderResult, Session } from '@warcommand/scenario-system';
+import type { SaveGame } from '@warcommand/replay-engine';
 import { MapView } from '../world-map/MapView';
-import { ALL_DOMAINS, boundsOf, DEFAULT_LAYERS, sceneFromPicture, type DomainFilter, type LayerToggles, type Selection } from '../world-map/scene';
-import { downloadJson, storeSave, type GameController } from './controller';
+import { ALL_DOMAINS, DEFAULT_LAYERS, sceneFromPicture, type DomainFilter, type LayerToggles, type Selection } from '../world-map/scene';
+import { downloadJson, storeSave, type GameLink } from './controller';
 import { Debrief } from './Debrief';
 import { defaultsFor, DetailPanel, Planner, planToOrder, rejectText, usesWaypoints, type PlanDraft } from './detail';
 import { SIDE_LABEL } from './i18n';
+import type { JointTool } from './joint';
 import { BottomPanel, ForcesPanel, TopBar } from './panels';
 
 interface Props {
-  controller: GameController;
+  controller: GameLink;
   onQuit: () => void;
-  /** Où mène la sortie : le menu principal, ou l'éditeur quand la partie en est un essai. */
+  /** Où mène la sortie : le menu principal, l'éditeur quand la partie en est un essai, la campagne. */
   quitLabel?: string;
-  onRestart: (seed: number) => void;
+  /** Rejouer la mission ; absent quand cela n'a pas de sens (campagne, partie à deux joueurs). */
+  onRestart?: (seed: number) => void;
+  /** Où va la sauvegarde ; par défaut, dans les sauvegardes du navigateur. Rend `false` si elle a échoué. */
+  onSave?: (title: string, save: SaveGame) => boolean;
+  /** Appelé une fois, quand la mission est terminée et que la partie complète est disponible. */
+  onEnded?: (session: Session) => void;
 }
 
-type Tool = { type: 'none' } | { type: 'measure' } | { type: 'ship'; unitId: string };
+type Tool = { type: 'none' } | { type: 'measure' } | { type: 'ship'; unitId: string } | JointTool;
+
+/** Confirmation affichée quand un ordre des composantes interarmées est accepté. */
+const ORDER_ACCEPTED: Partial<Record<GameOrder['type'], string>> = {
+  LAND_ORDER: 'Ordre transmis à la formation.',
+  LAND_TROOPS: 'Débarquement lancé.',
+  USE_EFFECT: 'Effet employé.',
+  SOF_INSERT: 'Équipe en route.',
+  SOF_EXTRACT: 'Exfiltration ordonnée.',
+};
 
 const KM_PER_NM = 1.852;
 
-export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le menu', onRestart }: Props) {
+export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le menu', onRestart, onSave, onEnded }: Props) {
   useSyncExternalStore(controller.subscribe, controller.getVersion, controller.getVersion);
   const pic = controller.picture();
   const events = controller.events();
-  const scenario = controller.session.scenario;
+  const brief = controller.brief;
+  const net = controller.net();
+  const final = controller.finalSession();
+  const [view3d, setView3d] = useState(false);
 
   const [selection, setSelection] = useState<Selection>(null);
   const [layers, setLayers] = useState<LayerToggles>(DEFAULT_LAYERS);
@@ -49,6 +68,18 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
     if (ended) setDebriefOpen(true);
   }, [ended]);
 
+  // La partie complète n'existe qu'à la fin (en réseau, quand le serveur l'a envoyée) : on la remet une fois.
+  const endedHandler = useRef(onEnded);
+  endedHandler.current = onEnded;
+  useEffect(() => {
+    if (final) endedHandler.current?.(final);
+  }, [final]);
+
+  const netError = net?.error ?? null;
+  useEffect(() => {
+    if (netError) setNotice({ text: netError, bad: true });
+  }, [netError]);
+
   useEffect(() => {
     if (!notice) return;
     const id = setTimeout(() => setNotice(null), 5000);
@@ -57,11 +88,13 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
 
   const say = (text: string, bad = false) => setNotice({ text, bad });
 
+  // La réponse vient du moteur : aussitôt en partie solitaire, après un aller-retour au serveur à deux joueurs.
   const sendOrder = useCallback(
-    (order: Order) => {
-      const result = controller.order(order);
-      if (!result.ok) setNotice({ text: rejectText(controller.picture(), result), bad: true });
+    async (order: GameOrder): Promise<GameOrderResult> => {
+      const result = await controller.order(order);
+      if (!result.ok) setNotice({ text: rejectText(controller.picture(), result, order.type), bad: true });
       else if (order.type === 'CREATE_MISSION' && result.missionId) setSelection({ type: 'mission', id: result.missionId });
+      else if (ORDER_ACCEPTED[order.type]) setNotice({ text: ORDER_ACCEPTED[order.type]!, bad: false });
       return result;
     },
     [controller],
@@ -125,11 +158,28 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
       return;
     }
     if (tool.type === 'ship') {
-      const result = sendOrder({ type: 'MOVE_SHIP', side: pic.side, unitId: tool.unitId, dest: pos });
-      if (result.ok) {
+      void sendOrder({ type: 'MOVE_SHIP', side: pic.side, unitId: tool.unitId, dest: pos }).then((result) => {
+        if (!result.ok) return;
         say('Ordre de déplacement transmis.');
         setTool({ type: 'none' });
-      }
+      });
+      return;
+    }
+    if (tool.type === 'land') {
+      if (tool.points.length >= 8) say('Huit points au maximum.', true);
+      else setTool({ ...tool, points: [...tool.points, pos] });
+      return;
+    }
+    if (tool.type === 'beach') {
+      void sendOrder({ type: 'LAND_TROOPS', side: pic.side, shipId: tool.shipId, unitId: tool.unitId, beach: pos }).then((result) => {
+        if (result.ok) setTool({ type: 'none' });
+      });
+      return;
+    }
+    if (tool.type === 'sof') {
+      void sendOrder({ type: 'SOF_INSERT', side: pic.side, unitId: tool.unitId, target: pos }).then((result) => {
+        if (result.ok) setTool({ type: 'none' });
+      });
       return;
     }
     setSelection(null);
@@ -146,33 +196,28 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
         layers,
         domains,
         selection,
-        draft: plan && usesWaypoints(plan.type) ? plan.waypoints : [],
+        draft: plan && usesWaypoints(plan.type) ? plan.waypoints : tool.type === 'land' ? tool.points : [],
         measure,
-        showNavalZone: tool.type === 'ship' || (selection?.type === 'unit' && pic.units.find((u) => u.id === selection.id)?.kind === 'ship') === true,
+        showNavalZone: tool.type === 'ship' || tool.type === 'beach' || (selection?.type === 'unit' && pic.units.find((u) => u.id === selection.id)?.naval != null),
       }),
     [pic, layers, domains, selection, plan, measure, tool],
   );
 
-  // Cadrage initial : les bases, les unités et le secteur d'objectif du scénario (information de briefing).
-  const fit = useMemo(() => {
-    const o = scenario.objective;
-    const edge = (bearing: number) => destination(o.center, bearing, o.radiusKm);
-    return boundsOf([
-      ...scenario.bases.map((b) => b.pos),
-      ...scenario.units.flatMap((u) => (u.pos ? [u.pos] : u.airborne ? [u.airborne.pos] : [])),
-      edge(0),
-      edge(90),
-      edge(180),
-      edge(270),
-    ]);
-  }, [scenario]);
-
   const measured = measure.length === 2 ? distanceKm(measure[0]!, measure[1]!) : null;
   const stamp = `${clockZ(pic.startIso, pic.time, false).replace(':', 'h')}Z`;
 
-  if (debriefOpen && ended) {
-    return <Debrief controller={controller} onBack={() => setDebriefOpen(false)} onQuit={onQuit} quitLabel={quitLabel} onRestart={onRestart} />;
+  if (debriefOpen && ended && final) {
+    return <Debrief session={final} playerSide={controller.playerSide} onBack={() => setDebriefOpen(false)} onQuit={onQuit} quitLabel={quitLabel} onRestart={onRestart} />;
   }
+
+  const opponent = net ? net.players[pic.side === 'BLUE' ? 'RED' : 'BLUE'] : null;
+  const save = () => {
+    const data = controller.save();
+    if (!data) return;
+    const title = `${brief.title} — ${SIDE_LABEL[pic.side]} — ${clockZ(pic.startIso, pic.time, false)} Z`;
+    const ok = onSave ? onSave(title, data) : storeSave(title, data);
+    say(ok ? 'Partie sauvegardée dans ce navigateur.' : 'Sauvegarde impossible : stockage du navigateur indisponible ou plein.', !ok);
+  };
 
   return (
     <div className="aoc">
@@ -184,14 +229,12 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
         night={controller.night()}
         turnS={turnS}
         planning={controller.planning}
+        net={net}
         onSpeed={(s) => controller.setSpeed(s)}
-        onStep={() => controller.advance(60)}
+        onStep={controller.canStep ? () => controller.advance(60) : undefined}
         onBriefing={() => setBriefingOpen(true)}
-        onSave={() => {
-          const ok = storeSave(`${scenario.title} — ${SIDE_LABEL[pic.side]} — ${clockZ(pic.startIso, pic.time, false)} Z`, controller.save());
-          say(ok ? 'Partie sauvegardée dans ce navigateur.' : 'Sauvegarde impossible : stockage du navigateur indisponible ou plein.', !ok);
-        }}
-        onExport={() => downloadJson(`war-command-${scenario.id}-${stamp}.json`, controller.save())}
+        onSave={controller.canSave ? save : undefined}
+        onExport={controller.canSave ? () => downloadJson(`war-command-${brief.scenarioId}-${stamp}.json`, controller.save()) : undefined}
         onQuit={onQuit}
         quitLabel={quitLabel}
         onDebrief={() => setDebriefOpen(true)}
@@ -217,14 +260,27 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
       />
 
       <main className="mapzone">
-        <MapView scene={scene} view={{ center: scenario.region.center, zoom: scenario.region.zoom }} fit={fit} picking={picking} showGraticule={layers.graticule} onMapClick={onMapClick} onSelect={setSelection} />
+        <MapView scene={scene} view={brief.region} fit={brief.fit} picking={picking} showGraticule={layers.graticule} view3d={view3d} onMapClick={onMapClick} onSelect={setSelection} />
+        <button type="button" className={`btn mapzone__mode${view3d ? ' is-on' : ''}`} aria-pressed={view3d} onClick={() => setView3d((v) => !v)} title="Globe en relief : altitude des aéronefs, courbure de la Terre. Clic droit ou Ctrl + glisser pour tourner et incliner.">
+          {view3d ? 'Vue 2D' : 'Vue 3D'}
+        </button>
+        {net && !opponent ? (
+          <div className="maphint maphint--wait">
+            En attente d’un adversaire — donnez-lui le code <b>{net.code}</b>. Vous pouvez déjà étudier la carte et préparer vos ordres.
+          </div>
+        ) : null}
+        {net && opponent && !opponent.connected && !ended ? <div className="maphint maphint--wait">{opponent.name} est déconnecté : la partie est en pause jusqu’à son retour.</div> : null}
+        {net && !net.online && !ended ? <div className="maphint maphint--wait">Liaison perdue avec le serveur — reconnexion en cours…</div> : null}
         {placingWaypoints ? <div className="maphint">Cliquez sur la carte pour placer {plan?.type === 'SWEEP' ? 'la route' : 'la station'} · Échap pour abandonner</div> : null}
         {resolving && !placingWaypoints && tool.type === 'none' ? (
           <div className="maphint">
             Tour en cours de résolution — ordres à {clockZ(pic.startIso, (Math.floor(pic.time / turnS) + 1) * turnS, false)} Z
           </div>
         ) : null}
-        {tool.type === 'ship' ? <div className="maphint">Cliquez la destination du bâtiment, dans sa zone de manœuvre · Échap pour abandonner</div> : null}
+        {tool.type === 'ship' ? <div className="maphint">Cliquez la destination du bâtiment, en mer, dans sa zone de manœuvre · Échap pour abandonner</div> : null}
+        {tool.type === 'land' ? <div className="maphint">Cliquez l’itinéraire de la formation ({tool.points.length} point{tool.points.length > 1 ? 's' : ''}), puis « Donner l’ordre » · Échap pour abandonner</div> : null}
+        {tool.type === 'beach' ? <div className="maphint">Cliquez la plage du débarquement, à moins de 8 km du bâtiment · Échap pour abandonner</div> : null}
+        {tool.type === 'sof' ? <div className="maphint">Cliquez le point d’observation de l’équipe, à terre · Échap pour abandonner</div> : null}
         {tool.type === 'measure' ? (
           <div className="maphint">
             {measured === null ? 'Mesure : cliquez deux points' : `Distance : ${Math.round(measured)} km · ${Math.round(measured / KM_PER_NM)} NM`} · Échap pour terminer
@@ -236,8 +292,8 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
           </div>
         ) : null}
         {ended ? (
-          <button type="button" className="btn btn--primary mapzone__cta" onClick={() => setDebriefOpen(true)}>
-            Mission terminée — voir le compte rendu
+          <button type="button" className="btn btn--primary mapzone__cta" disabled={!final} onClick={() => setDebriefOpen(true)}>
+            {final ? 'Mission terminée — voir le compte rendu' : 'Mission terminée — réception du compte rendu…'}
           </button>
         ) : null}
       </main>
@@ -252,19 +308,26 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
             onChange={setPlan}
             onCancel={() => setPlan(null)}
             onSubmit={() => {
-              const result = sendOrder(planToOrder(pic, plan));
-              if (result.ok) setPlan(null);
+              void sendOrder(planToOrder(pic, plan)).then((result) => {
+                if (result.ok) setPlan(null);
+              });
             }}
           />
         ) : (
           <DetailPanel
             pic={pic}
             selection={selection}
-            briefing={scenario.sides[pic.side].briefing}
+            briefing={brief.briefing}
             onSelect={setSelection}
             onPlan={openPlanner}
             onOrder={sendOrder}
             movingShip={tool.type === 'ship' ? tool.unitId : null}
+            jointTool={tool.type === 'land' || tool.type === 'beach' || tool.type === 'sof' ? tool : null}
+            onJointTool={(next) => {
+              setPlan(null);
+              setMeasure([]);
+              setTool(next ?? { type: 'none' });
+            }}
             onMoveShip={(unitId) => {
               setPlan(null);
               setMeasure([]);
@@ -280,17 +343,18 @@ export function GameScreen({ controller, onQuit, quitLabel = 'Quitter vers le me
         <div className="modal" role="dialog" aria-modal="true" aria-labelledby="briefing-title">
           <div className="modal__box">
             <p className="sheet__eyebrow">
-              {scenario.title} · {SIDE_LABEL[pic.side]}
+              {brief.title} · {SIDE_LABEL[pic.side]}
             </p>
             <h2 id="briefing-title">Briefing</h2>
-            <p>{scenario.description}</p>
-            <p>{scenario.sides[pic.side].briefing}</p>
+            <p>{brief.description}</p>
+            <p>{brief.briefing}</p>
             <ul className="tips">
               <li>
                 {turnS > 0
                   ? `Mode par tours : donnez vos ordres, puis choisissez une vitesse pour résoudre le tour de ${turnS / 60} minutes. La simulation s’arrête d’elle-même à la fin de chaque tour.`
                   : 'La simulation démarre en pause : préparez vos ordres, puis choisissez une vitesse (barre d’espace : pause).'}
               </li>
+              {net ? <li>Partie à deux joueurs : le temps avance à la plus lente des deux vitesses demandées. Chacun peut donc mettre en pause.</li> : null}
               <li>Sélectionnez une unité ou une mission pour agir ; « Nouvelle mission » ouvre le planificateur, et les points se posent sur la carte.</li>
               <li>Vous ne voyez que ce que vos capteurs détectent. Une piste « ? » n’est pas identifiée : vos appareils ne l’engagent pas.</li>
               <li>Vos équipages gèrent seuls la tenue de station, la poursuite, le ravitaillement et le retour au carburant minimal.</li>

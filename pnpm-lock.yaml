@@ -11,12 +11,18 @@ importers:
       '@types/node':
         specifier: ^24.0.0
         version: 24.19.2
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
       '@warcommand/ai-commander':
         specifier: workspace:*
         version: link:packages/ai-commander
       '@warcommand/air-operations':
         specifier: workspace:*
         version: link:packages/air-operations
+      '@warcommand/campaign-system':
+        specifier: workspace:*
+        version: link:packages/campaign-system
       '@warcommand/doctrine-engine':
         specifier: workspace:*
         version: link:packages/doctrine-engine
@@ -32,6 +38,9 @@ importers:
       '@warcommand/naval-operations':
         specifier: workspace:*
         version: link:packages/naval-operations
+      '@warcommand/net-play':
+        specifier: workspace:*
+        version: link:packages/net-play
       '@warcommand/replay-engine':
         specifier: workspace:*
         version: link:packages/replay-engine
@@ -53,6 +62,9 @@ importers:
       vitest:
         specifier: ^5.1.0
         version: 5.1.0(@types/node@24.19.2)(vite@8.3.8(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15))
+      ws:
+        specifier: ^8.23.0
+        version: 8.23.0
 
   apps/web:
     dependencies:
@@ -62,6 +74,9 @@ importers:
       '@warcommand/air-operations':
         specifier: workspace:*
         version: link:../../packages/air-operations
+      '@warcommand/campaign-system':
+        specifier: workspace:*
+        version: link:../../packages/campaign-system
       '@warcommand/doctrine-engine':
         specifier: workspace:*
         version: link:../../packages/doctrine-engine
@@ -77,6 +92,9 @@ importers:
       '@warcommand/naval-operations':
         specifier: workspace:*
         version: link:../../packages/naval-operations
+      '@warcommand/net-play':
+        specifier: workspace:*
+        version: link:../../packages/net-play
       '@warcommand/replay-engine':
         specifier: workspace:*
         version: link:../../packages/replay-engine
@@ -151,6 +169,24 @@ importers:
         specifier: workspace:*
         version: link:../simulation-core
 
+  packages/campaign-system:
+    dependencies:
+      '@warcommand/mission-editor':
+        specifier: workspace:*
+        version: link:../mission-editor
+      '@warcommand/scenario-system':
+        specifier: workspace:*
+        version: link:../scenario-system
+      '@warcommand/simulation-core':
+        specifier: workspace:*
+        version: link:../simulation-core
+      '@warcommand/unit-database':
+        specifier: workspace:*
+        version: link:../unit-database
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+
   packages/doctrine-engine:
     dependencies:
       '@warcommand/simulation-core':
@@ -198,6 +234,21 @@ importers:
       '@warcommand/air-operations':
         specifier: workspace:*
         version: link:../air-operations
+      '@warcommand/simulation-core':
+        specifier: workspace:*
+        version: link:../simulation-core
+
+  packages/net-play:
+    dependencies:
+      '@warcommand/air-operations':
+        specifier: workspace:*
+        version: link:../air-operations
+      '@warcommand/replay-engine':
+        specifier: workspace:*
+        version: link:../replay-engine
+      '@warcommand/scenario-system':
+        specifier: workspace:*
+        version: link:../scenario-system
       '@warcommand/simulation-core':
         specifier: workspace:*
         version: link:../simulation-core
@@ -838,6 +889,9 @@ packages:
   '@types/topojson-specification@1.0.5':
     resolution: {integrity: sha512-C7KvcQh+C2nr6Y2Ub4YfgvWvWCgP2nOQMtfhlnwsRL4pYmmwzBS7HclGiS87eQfDOU/DLQpX6GEscviaz4yLIQ==}
 
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
+
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
     engines: {node: '>=16.20.0'}
@@ -1375,6 +1429,18 @@ packages:
   world-atlas@2.0.2:
     resolution: {integrity: sha512-IXfV0qwlKXpckz1FhwXVwKRjiIhOnWttOskm5CtxMsjgE/MXAYRHWJqgXOpM8IkcPBoXnyTU5lFHcYa5ChG0LQ==}
 
+  ws@8.23.0:
+    resolution: {integrity: sha512-wCkmX8QMOrKjgO8HW2WyDbTSGeqkocxgDzS9iR79rEAexty6/2qzilx3Ag8Tqf9ykop3irLKle0MtVn5qjVnoQ==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   zod@4.6.7:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
@@ -1761,6 +1827,10 @@ snapshots:
   '@types/topojson-specification@1.0.5':
     dependencies:
       '@types/geojson': 7946.0.16
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 24.19.2
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -2206,5 +2276,7 @@ snapshots:
   why-is-node-running@3.2.1: {}
 
   world-atlas@2.0.2: {}
+
+  ws@8.23.0: {}
 
   zod@4.6.7: {}

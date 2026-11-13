@@ -2,13 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { clockZ, SIDES, type Difficulty, type SideId } from '@warcommand/simulation-core';
-import { SCENARIOS, type Scenario } from '@warcommand/scenario-system';
+import { SCENARIOS, type Scenario, type Session } from '@warcommand/scenario-system';
+import { loadRecording, replay } from '@warcommand/replay-engine';
 import { getPlatform, hasPlatform } from '@warcommand/unit-database';
 import { getDoctrine, hasDoctrine } from '@warcommand/doctrine-engine';
 import { createBlankScenario, duplicateScenario, importScenarioJson, uniqueScenarioId } from '@warcommand/mission-editor';
 import type { NewGameOptions } from './App';
 import { deleteSave, downloadJson, listSaves, type StoredSave } from './controller';
 import { DIFFICULTY_HELP, DIFFICULTY_LABEL, SIDE_LABEL } from './i18n';
+import type { CampaignSlot } from './campaignStore';
+import { CampaignCard, NetCard } from './MenuExtras';
+import type { RemoteController } from './remote';
 import { deleteCustomScenario, listCustomScenarios, saveCustomScenario, scenarioFileName, type CustomScenario } from './scenarioStore';
 
 interface Props {
@@ -16,6 +20,11 @@ interface Props {
   onLoad: (data: unknown) => string[];
   /** Ouvre l'éditeur. `unsaved` : le scénario n'existe encore nulle part (copie non enregistrée). */
   onEdit: (scenario: Scenario, unsaved: boolean) => void;
+  onCampaign: (slot: CampaignSlot) => void;
+  /** Le joueur est installé à une table du serveur de parties. */
+  onNet: (controller: RemoteController) => void;
+  /** Revoir une partie enregistrée : son compte rendu, son analyse et son rejeu. */
+  onReview: (session: Session) => void;
 }
 
 interface Entry {
@@ -38,7 +47,7 @@ function orderOfBattle(scenario: Scenario, side: SideId): string[] {
   return [...counts].map(([name, n]) => `${n} × ${name}`);
 }
 
-export function MainMenu({ onStart, onLoad, onEdit }: Props) {
+export function MainMenu({ onStart, onLoad, onEdit, onCampaign, onNet, onReview }: Props) {
   const [custom, setCustom] = useState<CustomScenario[]>([]);
   const [scenarioId, setScenarioId] = useState<string>(SCENARIOS[0]!.id);
   const [side, setSide] = useState<SideId>('BLUE');
@@ -51,6 +60,8 @@ export function MainMenu({ onStart, onLoad, onEdit }: Props) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const scenarioInput = useRef<HTMLInputElement | null>(null);
+  const recordingInput = useRef<HTMLInputElement | null>(null);
+  const [reviewing, setReviewing] = useState(false);
 
   useEffect(() => {
     setSaves(listSaves());
@@ -81,6 +92,33 @@ export function MainMenu({ onStart, onLoad, onEdit }: Props) {
     } catch {
       setErrors(['Ce fichier n’est pas un JSON lisible.']);
     }
+  };
+
+  /** Relit un enregistrement exporté et rejoue la partie jusqu'à son terme, pour en ouvrir le compte rendu. */
+  const importRecording = async (file: File) => {
+    let data: unknown;
+    try {
+      data = JSON.parse(await file.text());
+    } catch {
+      setErrors(['Ce fichier n’est pas un JSON lisible.']);
+      return;
+    }
+    const loaded = loadRecording(data);
+    if (!loaded.ok) {
+      setErrors(loaded.errors.slice(0, 6));
+      return;
+    }
+    setErrors([]);
+    setReviewing(true);
+    // La re-simulation prend un instant : on laisse d'abord le bouton afficher qu'elle est en cours.
+    setTimeout(() => {
+      try {
+        onReview(replay(loaded.recording));
+      } catch (error) {
+        setErrors([`Cet enregistrement ne peut pas être rejoué : ${error instanceof Error ? error.message : String(error)}`]);
+        setReviewing(false);
+      }
+    }, 30);
   };
 
   const importScenario = async (file: File) => {
@@ -122,7 +160,7 @@ export function MainMenu({ onStart, onLoad, onEdit }: Props) {
           <h1>WAR COMMAND</h1>
           <p>Air Operations Center</p>
         </div>
-        <p className="menu__tag">Phases 1 à 4 · opérations aériennes · éditeur de missions</p>
+        <p className="menu__tag">Phases 1 à 6 · opérations interarmées · campagne · deux joueurs · rejeu et analyse</p>
       </header>
 
       <div className="menu__grid">
@@ -267,9 +305,26 @@ export function MainMenu({ onStart, onLoad, onEdit }: Props) {
               e.target.value = '';
             }}
           />
-          <button type="button" className="btn" onClick={() => fileInput.current?.click()}>
-            Importer une sauvegarde (.json)
-          </button>
+          <div className="row">
+            <button type="button" className="btn" onClick={() => fileInput.current?.click()}>
+              Importer une sauvegarde (.json)
+            </button>
+            <input
+              ref={recordingInput}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              aria-label="Fichier d’enregistrement à revoir"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void importRecording(file);
+                e.target.value = '';
+              }}
+            />
+            <button type="button" className="btn" disabled={reviewing} onClick={() => recordingInput.current?.click()} title="Un enregistrement s’exporte depuis le compte rendu d’une partie terminée">
+              {reviewing ? 'Re-simulation en cours…' : 'Revoir un enregistrement (.json)'}
+            </button>
+          </div>
           {errors.length > 0 ? (
             <ul className="error">
               {errors.map((e) => (
@@ -278,6 +333,10 @@ export function MainMenu({ onStart, onLoad, onEdit }: Props) {
             </ul>
           ) : null}
         </section>
+
+        <CampaignCard onOpen={onCampaign} />
+
+        <NetCard scenario={scenario} custom={entry.custom} playable={entry.playable} side={side} seed={seedValue} seedValid={seedValid} wegoTurnMin={wegoTurnMin} onConnected={onNet} />
 
         <section className="card card--wide">
           <h2>Éditeur de missions</h2>

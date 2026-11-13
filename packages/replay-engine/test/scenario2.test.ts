@@ -6,7 +6,7 @@ import { buildAar } from '../src/index';
 
 describe('scénario « Brèche Boréale »', () => {
   it('est livré, valide, et met en scène les moyens de la phase 3', () => {
-    expect(SCENARIOS.map((s) => s.id)).toEqual(['bouclier-atlantique', 'breche-boreale']);
+    expect(SCENARIOS.map((s) => s.id)).toContain('breche-boreale');
     const session = createSession(BRECHE_BOREALE, { playerSide: 'BLUE' });
     const s = session.state;
     const of = (side: string, kind: string) => Object.values(s.units).filter((u) => u.side === side && u.kind === kind);

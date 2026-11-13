@@ -8,3 +8,5 @@ export * from './bt';
 export * from './picture';
 export * from './invariants';
 export * from './landmask';
+export * from './joint';
+export * from './terrain';

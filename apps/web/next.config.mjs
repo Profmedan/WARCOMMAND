@@ -14,6 +14,8 @@ const nextConfig = {
     '@warcommand/land-operations',
     '@warcommand/naval-operations',
     '@warcommand/multi-domain-effects',
+    '@warcommand/campaign-system',
+    '@warcommand/net-play',
   ],
 };
 

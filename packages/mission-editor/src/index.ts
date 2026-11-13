@@ -11,7 +11,12 @@ import {
   cloneData,
   distanceKm,
   hashState,
+  inBounds,
   inCircle,
+  isGroundForce,
+  isLand,
+  isManeuver,
+  isNaval,
   opponent,
   SIDES,
   snapshotPositions,
@@ -33,6 +38,8 @@ type UnitDef = Scenario['units'][number];
 type MissionDef = Scenario['missions'][number];
 type TriggerDef = Scenario['triggers'][number];
 type BaseDef = Scenario['bases'][number];
+type TerrainDef = Scenario['terrain'][number];
+type SatelliteDef = Scenario['satellites'][number];
 
 const fail = (error: string): EditResult => ({ ok: false, error });
 const done = (draft: Scenario, id?: string): EditResult => ({ ok: true, draft, id });
@@ -247,6 +254,8 @@ export function setMeta(d: Scenario, patch: MetaPatch): EditResult {
   if (patch.durationMin !== undefined) {
     if (!(patch.durationMin > 0 && patch.durationMin <= 24 * 60)) return fail('La durée doit être comprise entre 1 minute et 24 heures.');
     if (patch.durationMin < d.objective.defenderWinsAtMin) return fail('La durée ne peut pas être inférieure au seuil de victoire du défenseur.');
+    const late = d.satellites.filter((p) => p.endMin > patch.durationMin!);
+    if (late.length > 0) return fail(`La durée ne peut pas être inférieure à la fin de la fenêtre du satellite ${late.map((p) => p.name).join(', ')}.`);
   }
   if (patch.sensorFactor !== undefined && !(patch.sensorFactor >= 0.3 && patch.sensorFactor <= 1.2)) {
     return fail('Le facteur météo des capteurs doit être compris entre 0,3 et 1,2.');
@@ -293,9 +302,9 @@ export function setRegion(d: Scenario, region: RegionInput): EditResult {
   return done(next);
 }
 
-export type SidePatch = Partial<Pick<Scenario['sides']['BLUE'], 'name' | 'description' | 'doctrineId' | 'doctrineOverrides' | 'defaultRoe' | 'briefing' | 'aiInitialPosture' | 'aiPostureLockMin'>>;
+export type SidePatch = Partial<Pick<Scenario['sides']['BLUE'], 'name' | 'description' | 'doctrineId' | 'doctrineOverrides' | 'defaultRoe' | 'briefing' | 'aiInitialPosture' | 'aiPostureLockMin' | 'resilience' | 'effects'>>;
 
-/** Réglages d'une coalition : identité, doctrine, règles d'engagement, briefing, comportement initial de l'IA. */
+/** Réglages d'une coalition : identité, doctrine, règles d'engagement, briefing, comportement initial de l'IA, résilience et effets multi-domaines. */
 export function setSide(d: Scenario, side: SideId, patch: SidePatch): EditResult {
   if (patch.name !== undefined && patch.name.trim() === '') return fail('Le nom de la coalition ne peut pas être vide.');
   if (patch.aiPostureLockMin !== undefined && !(patch.aiPostureLockMin >= 0 && patch.aiPostureLockMin <= 600)) {
@@ -303,6 +312,10 @@ export function setSide(d: Scenario, side: SideId, patch: SidePatch): EditResult
   }
   for (const value of Object.values(patch.doctrineOverrides ?? {})) {
     if (value !== undefined && !(value >= 0 && value <= 1)) return fail('Un réglage de doctrine est compris entre 0 et 100 %.');
+  }
+  if (patch.resilience !== undefined && !(patch.resilience >= 0 && patch.resilience <= 1)) return fail('La résilience est comprise entre 0 et 100 %.');
+  if (patch.effects !== undefined && [patch.effects.cyber, patch.effects.jam].some((n) => !Number.isInteger(n) || n < 0 || n > 5)) {
+    return fail('Un camp dispose de zéro à cinq effets de chaque sorte.');
   }
   const next = cloneData(d);
   next.sides[side] = { ...next.sides[side], ...cloneData(patch) };
@@ -324,7 +337,7 @@ export function addBase(d: Scenario, input: { side: SideId; pos: LatLon; name?: 
   return done(next, id);
 }
 
-export type BasePatch = Partial<Pick<BaseDef, 'name' | 'pos' | 'weaponStock' | 'asmStock' | 'fuelStockKg'>>;
+export type BasePatch = Partial<Pick<BaseDef, 'name' | 'pos' | 'weaponStock' | 'asmStock' | 'fuelStockKg' | 'supplyStock'>>;
 
 export function updateBase(d: Scenario, id: string, patch: BasePatch): EditResult {
   const next = cloneData(d);
@@ -336,7 +349,13 @@ export function updateBase(d: Scenario, id: string, patch: BasePatch): EditResul
   }
   if (patch.pos !== undefined) {
     if (!isPos(patch.pos)) return fail('Position invalide.');
+    const host = next.units.find((u) => u.id === base.hostUnitId);
+    if (host) return fail(`${base.name} est portée par ${host.name} : déplacez le bâtiment.`);
     base.pos = { ...patch.pos };
+  }
+  if (patch.supplyStock !== undefined) {
+    if (!(patch.supplyStock >= 0)) return fail('Le stock de ravitaillement ne peut pas être négatif.');
+    base.supplyStock = patch.supplyStock;
   }
   for (const key of ['weaponStock', 'asmStock'] as const) {
     const value = patch[key];
@@ -354,9 +373,14 @@ export function updateBase(d: Scenario, id: string, patch: BasePatch): EditResul
 export function removeBase(d: Scenario, id: string): EditResult {
   const base = d.bases.find((b) => b.id === id);
   if (!base) return fail('Base inconnue.');
-  const n = d.units.filter((u) => u.baseId === id).length;
+  const attached = d.units.filter((u) => u.baseId === id);
+  const n = attached.length;
   if (n > 0) {
-    return fail(`Impossible de supprimer ${base.name} : ${n} aéronef${n > 1 ? 's y sont rattachés' : ' y est rattaché'}.`);
+    // Une base héberge des aéronefs, mais aussi les équipes spéciales qui en partent.
+    const what = attached.every((u) => getPlatform(u.platformId).domain === 'air')
+      ? `aéronef${n > 1 ? 's y sont rattachés' : ' y est rattaché'}`
+      : `unité${n > 1 ? 's y sont rattachées' : ' y est rattachée'}`;
+    return fail(`Impossible de supprimer ${base.name} : ${n} ${what}.`);
   }
   const next = cloneData(d);
   next.bases = next.bases.filter((b) => b.id !== id);
@@ -396,8 +420,28 @@ export function removeGroup(d: Scenario, id: string): EditResult {
 
 function shortName(record: PlatformRecord): string {
   if (!record.generic) return record.name;
-  return record.kind === 'ship' ? 'Frégate' : 'Sol-air';
+  if (record.id.startsWith('frigate')) return 'Frégate';
+  if (record.kind === 'sam') return 'Sol-air';
+  return record.name.replace(/\s*\(générique\)$/, '');
 }
+
+const jointValue = (platformId: string, key: 'lift' | 'deck'): number => (hasPlatform(platformId) ? (getPlatform(platformId).joint?.[key]?.value ?? 0) : 0);
+
+/** Motif pour lequel un aéronef ne peut pas être rattaché à cette base, ou `null`. Ne concerne que les bases portées par un bâtiment. */
+function deckRefusal(d: Scenario, base: BaseDef, record: PlatformRecord, exceptUnitId?: string): string | null {
+  if (base.hostUnitId === undefined) return null;
+  const host = d.units.find((u) => u.id === base.hostUnitId);
+  const deck = host ? jointValue(host.platformId, 'deck') : 0;
+  if (deck <= 0) return `${base.name} est le dépôt d’un navire logistique : il ne met pas d’aéronefs en œuvre.`;
+  if (!record.carrierCapable) return `${shortName(record)} ne peut pas opérer depuis un porte-avions.`;
+  const based = d.units.filter((u) => u.baseId === base.id && u.id !== exceptUnitId).length;
+  if (based >= deck) return `${base.name} est complet : ${deck} places sur le pont d’envol.`;
+  return null;
+}
+
+/** Stocks de départ de la base qu'un bâtiment apporte avec lui (valeurs de jeu, modifiables ensuite). */
+const DECK_STOCK = { weaponStock: 24, asmStock: 16, fuelStockKg: 150000, supplyStock: 0 };
+const HOLD_STOCK = { weaponStock: 0, asmStock: 0, fuelStockKg: 0, supplyStock: 400 };
 
 export interface AddUnitInput {
   side: SideId;
@@ -417,16 +461,35 @@ export function addUnit(d: Scenario, input: AddUnitInput): EditResult {
   const perf = toPerf(record);
   const next = cloneData(d);
   const isAir = record.domain === 'air';
+  const isSof = record.kind === 'sof';
+  // Le masque terre-mer vaut pour ce qui manœuvre : formations terrestres et bâtiments.
+  if (isGroundForce(record.kind) && !isLand(input.pos)) return fail('Une formation terrestre se pose à terre.');
+  if (isNaval(record.kind) && isLand(input.pos)) return fail('Un bâtiment se pose en mer.');
 
+  const nearest = (bases: BaseDef[]) => bases.reduce((best, b) => (distanceKm(b.pos, input.pos) < distanceKm(best.pos, input.pos) ? b : best));
   let baseId: string | undefined;
   if (isAir) {
     const own = next.bases.filter((b) => b.side === input.side);
     if (input.baseId !== undefined) {
-      if (!own.some((b) => b.id === input.baseId)) return fail('Cette base n’appartient pas à ce camp.');
-      baseId = input.baseId;
+      const base = own.find((b) => b.id === input.baseId);
+      if (!base) return fail('Cette base n’appartient pas à ce camp.');
+      const refusal = deckRefusal(next, base, record);
+      if (refusal) return fail(refusal);
+      baseId = base.id;
     } else {
       if (own.length === 0) return fail('Ajoutez d’abord une base pour ce camp : un aéronef doit être rattaché à une base.');
-      baseId = own.reduce((best, b) => (distanceKm(b.pos, input.pos) < distanceKm(best.pos, input.pos) ? b : best)).id;
+      const usable = own.filter((b) => deckRefusal(next, b, record) === null);
+      if (usable.length === 0) return fail('Aucune base de ce camp ne peut accueillir cet appareil.');
+      baseId = nearest(usable).id;
+    }
+  } else if (isSof) {
+    const own = next.bases.filter((b) => b.side === input.side && b.hostUnitId === undefined);
+    if (input.baseId !== undefined) {
+      if (!own.some((b) => b.id === input.baseId)) return fail('Une équipe spéciale part d’une base à terre de son camp.');
+      baseId = input.baseId;
+    } else {
+      if (own.length === 0) return fail('Ajoutez d’abord une base à terre pour ce camp : une équipe spéciale part d’une base.');
+      baseId = nearest(own).id;
     }
   }
 
@@ -454,10 +517,26 @@ export function addUnit(d: Scenario, input: AddUnitInput): EditResult {
     if (input.airborne) {
       unit.airborne = { pos: { ...input.pos }, altM: Math.min(DEFAULT_ALTITUDE_M[record.kind], perf.ceilingM), fuelFraction: 0.9 };
     }
+  } else if (isSof) {
+    unit.baseId = baseId;
   } else {
     unit.pos = { ...input.pos };
   }
   next.units.push(unit);
+
+  // Un porte-avions apporte son pont d'envol, un navire logistique son dépôt : une base portée par le bâtiment.
+  const deck = jointValue(record.id, 'deck');
+  if (deck > 0 || record.kind === 'supply') {
+    const slug = deck > 0 ? 'pont' : 'depot';
+    next.bases.push({
+      id: firstFree(new Set(next.bases.map((b) => b.id)), (n) => `${input.side.toLowerCase()}-${slug}-${n}`),
+      side: input.side,
+      name: `${deck > 0 ? 'Pont d’envol' : 'Dépôt flottant'} — ${unit.name}`,
+      pos: { ...input.pos },
+      ...(deck > 0 ? DECK_STOCK : HOLD_STOCK),
+      hostUnitId: id,
+    });
+  }
   return done(next, id);
 }
 
@@ -466,9 +545,26 @@ export function moveUnit(d: Scenario, id: string, pos: LatLon): EditResult {
   const next = cloneData(d);
   const unit = next.units.find((u) => u.id === id);
   if (!unit) return fail('Unité inconnue.');
-  if (getPlatform(unit.platformId).domain === 'air') {
+  const record = getPlatform(unit.platformId);
+  if (record.domain === 'air') {
     if (!unit.airborne) return fail('Un aéronef au sol se trouve à sa base : déplacez la base, ou mettez l’appareil en vol.');
     unit.airborne.pos = { ...pos };
+  } else if (record.kind === 'sof') {
+    return fail('Une équipe spéciale part de sa base : changez sa base de rattachement.');
+  } else if (isGroundForce(record.kind)) {
+    if (!isLand(pos)) {
+      const ship = next.units.find((u) => u.id === unit.embarkedIn);
+      return fail(ship ? `${unit.name} est à bord de ${ship.name} : déplacez le bâtiment, ou cliquez un point à terre pour la débarquer.` : 'Une formation terrestre reste à terre.');
+    }
+    // Posée à terre, une formation embarquée débarque.
+    delete unit.embarkedIn;
+    unit.pos = { ...pos };
+  } else if (isNaval(record.kind)) {
+    if (isLand(pos)) return fail('Un bâtiment reste en mer.');
+    unit.pos = { ...pos };
+    // Ce que le bâtiment porte le suit : pont d'envol ou dépôt, troupes embarquées.
+    for (const b of next.bases) if (b.hostUnitId === id) b.pos = { ...pos };
+    for (const u of next.units) if (u.embarkedIn === id) u.pos = { ...pos };
   } else {
     unit.pos = { ...pos };
   }
@@ -486,6 +582,15 @@ export interface UnitPatch {
   unavailableForMin?: number | null;
   /** Itinéraire de patrouille d'un bâtiment ; `null` : immobile. */
   patrol?: LatLon[] | null;
+  /** Formation terrestre : effectifs, moral et ravitaillement de départ (0 à 1), posture de départ. */
+  strength?: number;
+  morale?: number;
+  supply?: number;
+  posture?: 'hold' | 'defend';
+  /** Formation terrestre : bâtiment à bord duquel elle commence. Pour la remettre à terre, la déplacer sur la côte. */
+  embarkedIn?: string;
+  /** Bâtiment : chef de file suivi en formation ; `null` : navigue seul. */
+  leaderId?: string | null;
 }
 
 export function updateUnit(d: Scenario, id: string, patch: UnitPatch): EditResult {
@@ -495,6 +600,8 @@ export function updateUnit(d: Scenario, id: string, patch: UnitPatch): EditResul
   const record = getPlatform(unit.platformId);
   const perf = toPerf(record);
   const isAir = record.domain === 'air';
+  const isSof = record.kind === 'sof';
+  const ground = isGroundForce(record.kind);
 
   if (patch.name !== undefined) {
     if (patch.name.trim() === '') return fail('Le nom de l’unité ne peut pas être vide.');
@@ -509,9 +616,13 @@ export function updateUnit(d: Scenario, id: string, patch: UnitPatch): EditResul
     unit.groupId = patch.groupId;
   }
   if (patch.baseId !== undefined) {
-    if (!isAir) return fail('Seul un aéronef est rattaché à une base.');
-    if (!next.bases.some((b) => b.id === patch.baseId && b.side === unit.side)) return fail('Cette base n’appartient pas au camp de l’unité.');
-    unit.baseId = patch.baseId;
+    if (!isAir && !isSof) return fail('Seuls un aéronef ou une équipe spéciale sont rattachés à une base.');
+    const base = next.bases.find((b) => b.id === patch.baseId && b.side === unit.side);
+    if (!base) return fail('Cette base n’appartient pas au camp de l’unité.');
+    if (isSof && base.hostUnitId !== undefined) return fail('Une équipe spéciale part d’une base à terre.');
+    const refusal = isAir ? deckRefusal(next, base, record, unit.id) : null;
+    if (refusal) return fail(refusal);
+    unit.baseId = base.id;
   }
   if (patch.airborne !== undefined) {
     if (!isAir) return fail('Seul un aéronef peut être en vol.');
@@ -543,12 +654,50 @@ export function updateUnit(d: Scenario, id: string, patch: UnitPatch): EditResul
     if (patch.patrol === null || patch.patrol.length === 0) {
       delete unit.patrol;
     } else {
-      if (record.kind !== 'ship') return fail('Seul un bâtiment de surface patrouille.');
+      if (!isNaval(record.kind)) return fail('Seul un bâtiment patrouille.');
       if (patch.patrol.length > 8 || !patch.patrol.every(isPos)) return fail('Une patrouille compte huit points valides au plus.');
+      if (patch.patrol.some((p) => isLand(p))) return fail('Un point de la patrouille est à terre.');
       const zone = next.navalZones[unit.side];
       if (!zone) return fail(`Définissez d’abord la zone de manœuvre maritime du camp ${SIDE_NAME[unit.side]} (onglet Objectif) : une patrouille y est confinée.`);
       if (patch.patrol.some((p) => !inCircle(p, zone))) return fail('Un point de la patrouille est hors de la zone de manœuvre maritime du camp.');
       unit.patrol = patch.patrol.map((p) => ({ ...p }));
+    }
+  }
+
+  for (const key of ['strength', 'morale', 'supply'] as const) {
+    const value = patch[key];
+    if (value === undefined) continue;
+    if (!ground) return fail('Effectifs, moral, ravitaillement et posture sont réservés à une formation terrestre.');
+    if (!(value >= 0 && value <= 1)) return fail('Effectifs, moral et ravitaillement sont compris entre 0 et 100 %.');
+    unit[key] = value;
+  }
+  if (patch.posture !== undefined) {
+    if (!ground) return fail('Effectifs, moral, ravitaillement et posture sont réservés à une formation terrestre.');
+    unit.posture = patch.posture;
+  }
+  if (patch.embarkedIn !== undefined) {
+    if (!ground) return fail('Seule une formation terrestre embarque sur un bâtiment.');
+    const ship = next.units.find((u) => u.id === patch.embarkedIn);
+    if (!ship || ship.side !== unit.side || !ship.pos) return fail('Ce bâtiment n’appartient pas à son camp.');
+    const lift = jointValue(ship.platformId, 'lift');
+    if (lift <= 0) return fail(`${ship.name} ne transporte pas de troupes.`);
+    const aboard = next.units.filter((u) => u.embarkedIn === ship.id && u.id !== unit.id).length;
+    if (aboard >= lift) return fail(`${ship.name} est complet : sa capacité de transport est de ${lift} formation${lift > 1 ? 's' : ''}.`);
+    unit.embarkedIn = ship.id;
+    unit.pos = { ...ship.pos };
+  }
+  if (patch.leaderId !== undefined) {
+    if (patch.leaderId === null) {
+      delete unit.leaderId;
+    } else {
+      if (!isNaval(record.kind)) return fail('Seul un bâtiment suit un chef de file.');
+      const leader = next.units.find((u) => u.id === patch.leaderId);
+      if (!leader || leader.id === unit.id || leader.side !== unit.side || !isNaval(getPlatform(leader.platformId).kind)) {
+        return fail('Le chef de file doit être un autre bâtiment du même camp.');
+      }
+      if (leader.leaderId !== undefined) return fail(`${leader.name} suit déjà un autre bâtiment : choisissez son chef de file.`);
+      if (next.units.some((u) => u.leaderId === unit.id)) return fail(`${unit.name} a déjà une escorte : il ne peut pas suivre un autre bâtiment.`);
+      unit.leaderId = leader.id;
     }
   }
   return done(next, id);
@@ -556,9 +705,20 @@ export function updateUnit(d: Scenario, id: string, patch: UnitPatch): EditResul
 
 /** Supprime une unité et tout ce qui s'y rapportait : sa place dans les missions, le renseignement qui la visait. */
 export function removeUnit(d: Scenario, id: string): EditResult {
-  if (!d.units.some((u) => u.id === id)) return fail('Unité inconnue.');
+  const unit = d.units.find((u) => u.id === id);
+  if (!unit) return fail('Unité inconnue.');
+  const aboard = d.units.filter((u) => u.embarkedIn === id);
+  if (aboard.length > 0) {
+    return fail(`Impossible de supprimer ${unit.name} : ${aboard.map((u) => u.name).join(', ')} ${aboard.length > 1 ? 'sont' : 'est'} à bord. Remettez-${aboard.length > 1 ? 'les' : 'la'} à terre d’abord.`);
+  }
+  const hosted = new Set(d.bases.filter((b) => b.hostUnitId === id).map((b) => b.id));
+  const based = d.units.filter((u) => u.baseId !== undefined && hosted.has(u.baseId)).length;
+  if (based > 0) return fail(`Impossible de supprimer ${unit.name} : ${based} appareil${based > 1 ? 's sont basés' : ' est basé'} sur son pont d’envol.`);
   const next = cloneData(d);
   next.units = next.units.filter((u) => u.id !== id);
+  // Le pont d'envol ou le dépôt part avec le bâtiment ; son escorte navigue désormais seule.
+  next.bases = next.bases.filter((b) => b.hostUnitId !== id);
+  for (const u of next.units) if (u.leaderId === id) delete u.leaderId;
   next.missions = next.missions.map((m) => ({ ...m, unitIds: m.unitIds.filter((uid) => uid !== id) })).filter((m) => m.unitIds.length > 0);
   next.intel = next.intel.filter((k) => k.unitId !== id);
   return done(next);
@@ -660,7 +820,7 @@ export function removeMission(d: Scenario, index: number): EditResult {
 
 /* ------------------------------------------------------------------ Objectif, zones, déclencheurs */
 
-export type ObjectivePatch = Partial<Pick<Scenario['objective'], 'name' | 'center' | 'radiusKm' | 'defender' | 'defenderWinsAtMin' | 'challengerWinsBelowMin'>>;
+export type ObjectivePatch = Partial<Pick<Scenario['objective'], 'name' | 'center' | 'radiusKm' | 'defender' | 'defenderWinsAtMin' | 'challengerWinsBelowMin' | 'kind'>>;
 
 export function setObjective(d: Scenario, patch: ObjectivePatch): EditResult {
   const next = cloneData(d);
@@ -693,6 +853,116 @@ export function setNavalZone(d: Scenario, side: SideId, zone: Circle | null): Ed
   next.navalZones[side] = zone ? { center: { ...zone.center }, radiusKm: zone.radiusKm } : null;
   return done(next);
 }
+
+/* ------------------------------------------------------------------ Terrain et satellites */
+
+const TERRAIN_NAME: Record<TerrainDef['kind'], string> = { urbain: 'Zone urbaine', foret: 'Forêt', montagne: 'Massif', marais: 'Marais' };
+/** Rayon proposé à la pose d'une zone, en km. */
+const TERRAIN_RADIUS_KM: Record<TerrainDef['kind'], number> = { urbain: 8, foret: 15, montagne: 20, marais: 10 };
+
+const inRegion = (d: Scenario, pos: LatLon | undefined): pos is LatLon => isPos(pos) && inBounds(pos, d.region.bounds);
+
+/** Zone de terrain particulier : elle change la mobilité et la protection des formations qui s'y trouvent. */
+export function addTerrain(d: Scenario, input: { kind: TerrainDef['kind']; center: LatLon; radiusKm?: number; name?: string }): EditResult {
+  if (!inRegion(d, input.center)) return fail('Ce point est hors de la région du scénario.');
+  const radiusKm = input.radiusKm ?? TERRAIN_RADIUS_KM[input.kind];
+  if (!(radiusKm > 0)) return fail('Le rayon de la zone doit être positif.');
+  const next = cloneData(d);
+  const id = firstFree(new Set(next.terrain.map((t) => t.id)), (n) => `terrain-${n}`);
+  const names = new Set(next.terrain.map((t) => t.name));
+  const name = input.name?.trim() || firstFree(names, (n) => `${TERRAIN_NAME[input.kind]} ${n}`);
+  next.terrain.push({ id, name, kind: input.kind, center: { ...input.center }, radiusKm });
+  return done(next, id);
+}
+
+export type TerrainPatch = Partial<Pick<TerrainDef, 'name' | 'kind' | 'center' | 'radiusKm'>>;
+
+export function updateTerrain(d: Scenario, id: string, patch: TerrainPatch): EditResult {
+  const next = cloneData(d);
+  const zone = next.terrain.find((t) => t.id === id);
+  if (!zone) return fail('Zone de terrain inconnue.');
+  if (patch.name !== undefined) {
+    if (patch.name.trim() === '') return fail('La zone doit avoir un nom.');
+    zone.name = patch.name;
+  }
+  if (patch.kind !== undefined) zone.kind = patch.kind;
+  if (patch.center !== undefined) {
+    if (!inRegion(d, patch.center)) return fail('Ce point est hors de la région du scénario.');
+    zone.center = { ...patch.center };
+  }
+  if (patch.radiusKm !== undefined) {
+    if (!(patch.radiusKm > 0)) return fail('Le rayon de la zone doit être positif.');
+    zone.radiusKm = patch.radiusKm;
+  }
+  return done(next, id);
+}
+
+export function removeTerrain(d: Scenario, id: string): EditResult {
+  if (!d.terrain.some((t) => t.id === id)) return fail('Zone de terrain inconnue.');
+  const next = cloneData(d);
+  next.terrain = next.terrain.filter((t) => t.id !== id);
+  return done(next);
+}
+
+function satelliteError(d: Scenario, p: SatelliteDef): string | null {
+  if (p.name.trim() === '') return 'Le satellite doit avoir un nom.';
+  if (!(p.startMin >= 0) || !(p.endMin > p.startMin)) return 'La fenêtre de couverture doit commencer avant de finir.';
+  if (p.endMin > d.durationMin) return 'La fenêtre de couverture dépasse la durée du scénario.';
+  if (!(p.footprint.radiusKm > 0)) return 'Le rayon de l’empreinte doit être positif.';
+  if (!inRegion(d, p.footprint.center)) return 'Le centre de l’empreinte est hors de la région du scénario.';
+  return null;
+}
+
+/** Fenêtre de couverture d'un satellite d'observation fictif : pendant ce créneau, le camp voit ce qui se trouve dans l'empreinte. */
+export function addSatellite(d: Scenario, input: { side: SideId; center: LatLon; radiusKm?: number; startMin?: number; endMin?: number; name?: string }): EditResult {
+  const next = cloneData(d);
+  const startMin = input.startMin ?? Math.min(15, Math.floor(d.durationMin / 4));
+  const pass: SatelliteDef = {
+    id: firstFree(new Set(next.satellites.map((p) => p.id)), (n) => `satellite-${n}`),
+    side: input.side,
+    name: input.name?.trim() || firstFree(new Set(next.satellites.map((p) => p.name)), (n) => `Observateur ${n}`),
+    startMin,
+    endMin: input.endMin ?? Math.min(d.durationMin, startMin + 15),
+    footprint: { center: { ...input.center }, radiusKm: input.radiusKm ?? 60 },
+  };
+  const error = satelliteError(d, pass);
+  if (error) return fail(error);
+  next.satellites.push(pass);
+  return done(next, pass.id);
+}
+
+export interface SatellitePatch {
+  name?: string;
+  side?: SideId;
+  startMin?: number;
+  endMin?: number;
+  center?: LatLon;
+  radiusKm?: number;
+}
+
+export function updateSatellite(d: Scenario, id: string, patch: SatellitePatch): EditResult {
+  const next = cloneData(d);
+  const pass = next.satellites.find((p) => p.id === id);
+  if (!pass) return fail('Satellite inconnu.');
+  if (patch.name !== undefined) pass.name = patch.name;
+  if (patch.side !== undefined) pass.side = patch.side;
+  if (patch.startMin !== undefined) pass.startMin = patch.startMin;
+  if (patch.endMin !== undefined) pass.endMin = patch.endMin;
+  if (patch.center !== undefined) pass.footprint.center = { ...patch.center };
+  if (patch.radiusKm !== undefined) pass.footprint.radiusKm = patch.radiusKm;
+  const error = satelliteError(d, pass);
+  if (error) return fail(error);
+  return done(next, id);
+}
+
+export function removeSatellite(d: Scenario, id: string): EditResult {
+  if (!d.satellites.some((p) => p.id === id)) return fail('Satellite inconnu.');
+  const next = cloneData(d);
+  next.satellites = next.satellites.filter((p) => p.id !== id);
+  return done(next);
+}
+
+/* ------------------------------------------------------------------ Déclencheurs */
 
 export function addTrigger(d: Scenario, input: { condition: TriggerDef['condition']; actions: TriggerDef['actions']; id?: string }): EditResult {
   if (input.actions.length === 0) return fail('Un déclencheur doit avoir au moins une action.');
@@ -729,6 +999,13 @@ function warningsOf(d: Scenario): string[] {
   const kindOf = (u: UnitDef) => getPlatform(u.platformId).kind;
 
   for (const side of SIDES) {
+    if (d.objective.kind === 'ground') {
+      // Une zone terrestre se tient avec des formations de mêlée, embarquées comprises ; la chasse n'y est pour rien.
+      if (!d.units.some((u) => u.side === side && isManeuver(kindOf(u)))) {
+        warnings.push(`Le camp ${SIDE_NAME[side]} n’a aucune formation de mêlée (infanterie, mécanisés, blindés, reconnaissance, génie) : il ne pourra pas tenir la zone.`);
+      }
+      continue;
+    }
     const fighters = d.units.filter((u) => u.side === side && kindOf(u) === 'fighter');
     if (fighters.length === 0) {
       warnings.push(`Le camp ${SIDE_NAME[side]} n’a aucun chasseur : il ne pourra pas disputer le secteur.`);
@@ -811,6 +1088,8 @@ export type QuickTestResult =
       sorties: Record<SideId, number>;
       shots: Record<SideId, number>;
       fightersLost: Record<SideId, number>;
+      /** Effectifs perdus par les formations terrestres, en équivalent formation. */
+      landStrengthLost: Record<SideId, number>;
       events: number;
       /** Violations des contrôles de cohérence du moteur (aucune attendue). */
       violations: string[];
@@ -844,6 +1123,7 @@ export function quickTest(d: Scenario, options: { seed?: number; difficulty?: Sc
       sorties: { BLUE: s.stats.BLUE.sorties, RED: s.stats.RED.sorties },
       shots: { BLUE: s.stats.BLUE.shotsFired, RED: s.stats.RED.shotsFired },
       fightersLost: { BLUE: s.stats.BLUE.losses.fighter, RED: s.stats.RED.losses.fighter },
+      landStrengthLost: { BLUE: s.stats.BLUE.landStrengthLost, RED: s.stats.RED.landStrengthLost },
       events: s.events.length,
       violations,
       hash: hashState(s),

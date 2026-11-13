@@ -1,0 +1,15 @@
+{
+  "name": "@warcommand/campaign-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@warcommand/simulation-core": "workspace:*",
+    "@warcommand/scenario-system": "workspace:*",
+    "@warcommand/unit-database": "workspace:*",
+    "@warcommand/mission-editor": "workspace:*",
+    "zod": "^4.6.7"
+  }
+}

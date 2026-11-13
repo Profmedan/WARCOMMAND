@@ -7,6 +7,10 @@ import {
   emit,
   inBounds,
   inCircle,
+  isLand,
+  isNaval,
+  isSurfaceShip,
+  pathAtSea,
   type LatLon,
   type Loadout,
   type Mission,
@@ -18,7 +22,7 @@ import {
   type Unit,
   type UnitKind,
 } from '@warcommand/simulation-core';
-import { baseOf, membersOf, orderRtb, perfOf, scrambleDelayS } from './helpers';
+import { airOrderDelayS, baseOf, membersOf, orderRtb, perfOf } from './helpers';
 import { missionWithinRange, usableTankers } from './planning';
 
 export interface MissionDraft {
@@ -68,6 +72,8 @@ export type RejectCode =
   | 'NOT_AIRBORNE'
   | 'NOT_A_SHIP'
   | 'OUT_OF_NAVAL_ZONE'
+  | 'NOT_AT_SEA'
+  | 'BASE_CLOSED'
   | 'NO_ORDNANCE'
   | 'BAD_LOADOUT'
   | 'BAD_ESCORT'
@@ -99,6 +105,9 @@ export const MISSION_PREFIX: Record<MissionType, string> = {
   RECON: 'REC',
 };
 
+/** Missions qui délivrent des munitions air-surface : attaque des défenses ou des bâtiments, appui rapproché. */
+export const isStrikeMission = (type: MissionType): boolean => type === 'SEAD' || type === 'CAS';
+
 export const MAX_WAYPOINTS = 8;
 export const MIN_ALTITUDE_M = 150;
 
@@ -110,19 +119,20 @@ const reject = (code: RejectCode, unitId?: string): OrderResult => ({ ok: false,
  */
 function loadoutPlan(s: SimState, u: Unit, d: MissionDraft): { change: Loadout | null } | RejectCode {
   const p = perfOf(s, u);
-  const wantedId = d.loadoutId ?? (d.type === 'SEAD' ? (p.loadouts.find((l) => l.asm > 0)?.id ?? null) : null);
-  if (wantedId === null) return d.type === 'SEAD' ? 'NO_ORDNANCE' : { change: null };
+  const strike = isStrikeMission(d.type);
+  const wantedId = d.loadoutId ?? (strike ? (p.loadouts.find((l) => l.asm > 0)?.id ?? null) : null);
+  if (wantedId === null) return strike ? 'NO_ORDNANCE' : { change: null };
   const wanted = p.loadouts.find((l) => l.id === wantedId);
   if (!wanted) return 'BAD_LOADOUT';
 
   if (u.status === 'airborne') {
     // En vol, on fait avec ce que l'on emporte.
-    if (d.type === 'SEAD') return u.asm > 0 ? { change: null } : 'NO_ORDNANCE';
+    if (strike) return u.asm > 0 ? { change: null } : 'NO_ORDNANCE';
     return wantedId === u.loadoutId ? { change: null } : 'BAD_LOADOUT';
   }
   const base = baseOf(s, u);
   const carried = u.loadoutId === wantedId ? u.asm : 0;
-  if (d.type === 'SEAD' && carried + (base?.asmStock ?? 0) <= 0) return 'NO_ORDNANCE';
+  if (strike && carried + (base?.asmStock ?? 0) <= 0) return 'NO_ORDNANCE';
   return { change: wantedId === u.loadoutId ? null : wanted };
 }
 
@@ -157,7 +167,8 @@ function validateMission(s: SimState, side: SideId, d: MissionDraft): OrderResul
     target = contact.pos;
   } else if (d.type === 'SEAD') {
     const contact = d.targetContactId ? s.contacts[side][d.targetContactId] : undefined;
-    if (!contact || !contact.identified || (contact.kind !== 'sam' && contact.kind !== 'ship')) return reject('UNKNOWN_CONTACT');
+    // Cible d'une attaque : un site sol-air, ou un bâtiment de surface quel qu'il soit.
+    if (!contact || !contact.identified || contact.kind === null || (contact.kind !== 'sam' && !isSurfaceShip(contact.kind))) return reject('UNKNOWN_CONTACT');
     target = contact.pos;
   } else if (d.type === 'ESCORT') {
     const escorted = d.escortUnitId ? s.units[d.escortUnitId] : undefined;
@@ -203,6 +214,8 @@ function validateMission(s: SimState, side: SideId, d: MissionDraft): OrderResul
     const base = baseOf(s, u);
     if (!base) return reject('UNIT_UNAVAILABLE', id);
     const airborne = u.status === 'airborne';
+    // Un pont d'envol fermé ne lance plus personne.
+    if (!airborne && base.closed) return reject('BASE_CLOSED', id);
     const reachable = missionWithinRange({
       perf: p,
       rules: s.rules,
@@ -241,12 +254,14 @@ export function validateOrder(s: SimState, order: Order): OrderResult {
       const u = s.units[order.unitId];
       if (!u) return reject('UNKNOWN_UNIT', order.unitId);
       if (u.side !== order.side) return reject('WRONG_SIDE', order.unitId);
-      if (u.kind !== 'ship') return reject('NOT_A_SHIP', order.unitId);
+      if (!isNaval(u.kind)) return reject('NOT_A_SHIP', order.unitId);
       if (u.status !== 'active') return reject('UNIT_UNAVAILABLE', order.unitId);
       const zone = s.navalZones[order.side];
       if (!zone || !Number.isFinite(order.dest.lat) || !Number.isFinite(order.dest.lon) || !inCircle(order.dest, zone)) {
         return reject('OUT_OF_NAVAL_ZONE', order.unitId);
       }
+      // Pas de trajet physiquement impossible : un bâtiment reste en mer, de bout en bout.
+      if (isLand(order.dest) || !pathAtSea(u.pos, order.dest)) return reject('NOT_AT_SEA', order.unitId);
       return { ok: true };
     }
   }
@@ -305,7 +320,7 @@ export function applyOrder(s: SimState, order: Order): OrderResult {
       });
       const onGround = units.filter((u) => u.status !== 'airborne');
       const earliest =
-        onGround.length > 0 ? Math.max(s.time + scrambleDelayS(s.rules, s.doctrine[side]), ...onGround.map((u) => u.availableAt)) : s.time;
+        onGround.length > 0 ? Math.max(s.time + airOrderDelayS(s, side), ...onGround.map((u) => u.availableAt)) : s.time;
       const mission: Mission = {
         id,
         side,

@@ -8,12 +8,15 @@
  *   pnpm sim --journal             affiche le journal complet (vue observateur)
  *   pnpm sim --scenario breche-boreale   choisit le scénario (par défaut : bouclier-atlantique)
  *   pnpm sim --file mon-scenario.json    joue un scénario exporté par l'éditeur de missions
+ *   pnpm sim --analyse             ajoute l'analyse des opérations (tirs, chaîne d'engagement, missions, moments clés)
+ *   pnpm sim --rejeux 12           rejoue la partie avec douze autres tirages et dit si le résultat tient
+ *   pnpm sim --record partie.json  écrit l'enregistrement de la partie, à revoir dans le jeu (« Revoir un enregistrement »)
  */
-import { readFileSync } from 'node:fs';
-import { clockZ, hashState, type Difficulty, type SimEvent } from '@warcommand/simulation-core';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { clockZ, GROUND_FORCE_KINDS, hashState, NAVAL_KINDS, type Difficulty, type SimEvent } from '@warcommand/simulation-core';
 import { createSession, runToEnd, SCENARIOS, type Scenario } from '@warcommand/scenario-system';
 import { checkScenario, importScenarioJson } from '@warcommand/mission-editor';
-import { buildAar } from '@warcommand/replay-engine';
+import { analyzeRecording, buildAar, recordingOf, rerunSeeds, rerunWithSeed, summarizeReruns } from '@warcommand/replay-engine';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -107,9 +110,54 @@ if (campaign) {
         `${st.losses.fighter} chasseurs perdus, ${st.damaged} endommagés, ${Math.round(st.fuelBurnedKg / 1000)} t de carburant, ` +
         `${Math.round(st.fuelTransferredKg / 1000)} t ravitaillées`,
     );
+    // Bilan interarmées : seulement si le camp a engagé des formations terrestres ou des bâtiments.
+    const groundLost = GROUND_FORCE_KINDS.reduce((n, kind) => n + st.losses[kind], 0);
+    const shipsLost = NAVAL_KINDS.reduce((n, kind) => n + st.losses[kind], 0);
+    if (side.units.some((u) => GROUND_FORCE_KINDS.includes(u.kind) || NAVAL_KINDS.includes(u.kind))) {
+      console.log(
+        `    à terre : ${st.landStrengthLost.toFixed(1)} formation d'effectifs perdus, ${groundLost} formations détruites · ` +
+          `en mer : ${shipsLost} bâtiments perdus, ${st.ssmFired} missiles antinavires, ${st.torpedoesFired} torpilles · ${st.effectsUsed} effets multi-domaines`,
+      );
+    }
     for (const d of side.aiDecisions) {
       console.log(`    ${clockZ(s.startIso, d.t)} ${d.level === 'strategic' ? 'STRAT' : 'OPER '} ${d.code} ${JSON.stringify(d.p)} ${Object.keys(d.utilities).length ? JSON.stringify(d.utilities) : ''}`);
     }
   }
   console.log(`Événements : ${s.events.length} · empreinte d'état ${hashState(s)} · ${ms.toFixed(0)} ms de calcul`);
+
+  const recording = recordingOf(session);
+  const camp = (side: string) => (side === 'BLUE' ? 'BLEU ' : 'ROUGE');
+  const at = (t: number) => clockZ(s.startIso, Math.max(0, t));
+
+  if (flag('analyse')) {
+    const a = analyzeRecording(recording);
+    console.log('\nAnalyse des opérations');
+    console.log('  Tirs — camp, arme : tirs, coups au but (attendus), destructions');
+    for (const l of a.engagements) console.log(`    ${camp(l.side)} ${l.weapon.padEnd(7)} : ${l.shots} tirs, ${l.hits} au but (${l.expectedHits.toFixed(1)} attendus), ${l.kills} destructions`);
+    for (const id of ['BLUE', 'RED'] as const) {
+      const m = a.chainMedians[id];
+      const sec = (v: number | null) => (v === null ? '—' : `${Math.round(v)} s`);
+      console.log(`  Chaîne d'engagement ${camp(id)} : détection → premier tir ${sec(m.detectToShotS)} · premier tir → destruction ${sec(m.shotToKillS)} (médianes)`);
+    }
+    console.log('  Missions — départ, temps sur zone, tirs, coups au but, pertes');
+    for (const m of a.missions) {
+      console.log(`    ${camp(m.side)} ${m.name.padEnd(10)} ${m.type.padEnd(7)} ${m.launchedAt === null ? 'non partie' : at(m.launchedAt)}  ${minutes(m.onStationS)} min  ${m.shots} tirs  ${m.hits} au but  ${m.lost} perdus`);
+    }
+    console.log('  Moments clés');
+    for (const m of a.keyMoments) console.log(`    ${at(m.t)} ${m.kind.padEnd(8)} ${m.side ? camp(m.side) : '     '} ${JSON.stringify(m.p)}`);
+  }
+
+  const reruns = arg('rejeux');
+  if (reruns) {
+    const results = rerunSeeds(seed, Number(reruns)).map((other) => rerunWithSeed(recording, other));
+    const sum = summarizeReruns(results, s.outcome);
+    console.log(`\nPart du hasard — ${sum.runs} rejeux avec d'autres tirages : BLEU ${sum.wins.BLUE} · ROUGE ${sum.wins.RED} · indécis ${sum.wins.DRAW}`);
+    console.log(`  Même vainqueur que la partie : ${sum.sameAsOriginal} sur ${sum.runs} · contrôle du défenseur (min) : ${minutes(sum.defenderControlSec.min).trim()} à ${minutes(sum.defenderControlSec.max).trim()}, médiane ${minutes(sum.defenderControlSec.median).trim()}`);
+  }
+
+  const out = arg('record');
+  if (out) {
+    writeFileSync(out, JSON.stringify(recording, null, 2));
+    console.log(`\nEnregistrement écrit : ${out}`);
+  }
 }

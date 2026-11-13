@@ -34,6 +34,8 @@ export interface SetupOptions {
   seed: number;
   /** Mode par tours (WEGO) : durée d'un tour en minutes ; 0 ou absent = temps continu. */
   wegoTurnMin?: number;
+  /** Partie à deux joueurs humains : aucun camp n'est confié à l'IA. */
+  versus?: boolean;
 }
 
 /** Une mission initiale du scénario est refusée par le moteur (hors rayon d'action, altitude…). */
@@ -269,7 +271,8 @@ export function createInitialState(scenario: Scenario, options: SetupOptions): S
   }
 
   for (const side of SIDES) {
-    if (side !== options.playerSide) {
+    // À deux joueurs humains, aucun camp n'est confié à l'IA.
+    if (side !== options.playerSide && !options.versus) {
       const def = scenario.sides[side];
       const forced = def.aiInitialPosture !== null ? { posture: def.aiInitialPosture, untilS: Math.round(def.aiPostureLockMin * 60) } : null;
       state.ai[side] = createAiMemory(side === o.defender ? 'defender' : 'challenger', options.difficulty, forced);
@@ -323,7 +326,7 @@ export function createInitialState(scenario: Scenario, options: SetupOptions): S
       damaged: false,
       radarSeenAt: -1e9,
       source: 'intel',
-      fixed: target.domain === 'ground',
+      fixed: target.kind === 'sam',
     };
   }
 

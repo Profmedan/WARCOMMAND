@@ -1,5 +1,6 @@
 import {
   bearingDeg,
+  c2DelayFactor,
   centroid,
   destination,
   distanceKm,
@@ -83,6 +84,11 @@ export function scrambleDelayS(rules: Rules, d: DoctrineParams): number {
   return Math.round(rules.scrambleBaseS * (0.5 + d.centralisation));
 }
 
+/** Délai de décollage effectif d'un camp : celui de sa doctrine, allongé si ses réseaux sont perturbés. */
+export function airOrderDelayS(s: SimState, side: Unit['side']): number {
+  return Math.round(scrambleDelayS(s.rules, s.doctrine[side]) * c2DelayFactor(s, side));
+}
+
 /** Les règles d'engagement autorisent-elles à engager cette piste ? */
 export function roeAllows(s: SimState, shooter: Unit, roe: Roe, c: Contact): boolean {
   // Une piste qui a ouvert le feu est hostile, identifiée ou non : la riposte est toujours permise.
@@ -137,6 +143,60 @@ export function orderRtb(s: SimState, u: Unit, reason: RtbReason): void {
   u.refuelFromId = null;
   u.missionId = null;
   emit(s, 'UNIT_RTB', [u.side], { unit: u.name, reason });
+}
+
+/** Ferme les bases que porte un bâtiment (pont d'envol, dépôt flottant). */
+function closeHostedBases(s: SimState, ship: Unit): Base[] {
+  const hosted = Object.values(s.bases).filter((b) => b.hostUnitId === ship.id);
+  for (const b of hosted) {
+    if (b.closed) continue;
+    b.closed = true;
+    emit(s, 'BASE_CLOSED', [b.side], { base: b.name });
+  }
+  return hosted;
+}
+
+/**
+ * Coup au but sur un bâtiment : il perd des points de coque. À la moitié de sa coque ou moins, il est
+ * hors de combat (ni radar, ni tir, pont d'envol fermé) ; à zéro, il coule, avec les troupes qu'il
+ * transporte et les appareils restés à bord.
+ */
+export function hitShip(s: SimState, ship: Unit, points: number): 'hit' | 'damaged' | 'sunk' {
+  const n = ship.naval;
+  if (!n || ship.status !== 'active') return 'hit';
+  n.hull = Math.max(0, n.hull - points);
+
+  if (n.hull <= 0) {
+    emit(s, 'UNIT_DESTROYED', [ship.side], { unit: ship.name });
+    destroyUnit(s, ship);
+    for (const id of n.troops) {
+      const troop = s.units[id];
+      if (!troop || troop.status === 'destroyed') continue;
+      emit(s, 'UNIT_DESTROYED', [troop.side], { unit: troop.name });
+      destroyUnit(s, troop);
+    }
+    n.troops = [];
+    n.landing = null;
+    for (const b of closeHostedBases(s, ship)) {
+      for (const u of Object.values(s.units)) {
+        if (u.baseId !== b.id || u.status === 'airborne' || u.status === 'destroyed' || u.status === 'embarked') continue;
+        emit(s, 'UNIT_DESTROYED', [u.side], { unit: u.name });
+        destroyUnit(s, u);
+      }
+    }
+    return 'sunk';
+  }
+
+  if (n.hull <= perfOf(s, ship).hull / 2) {
+    if (!ship.damaged) {
+      ship.damaged = true;
+      s.stats[ship.side].damaged += 1;
+      emit(s, 'UNIT_DAMAGED', [ship.side], { unit: ship.name });
+      closeHostedBases(s, ship);
+    }
+    return 'damaged';
+  }
+  return 'hit';
 }
 
 export function destroyUnit(s: SimState, u: Unit): void {

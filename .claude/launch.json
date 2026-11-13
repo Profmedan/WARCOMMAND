@@ -6,6 +6,12 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["dev"],
       "port": 3210
+    },
+    {
+      "name": "war-command-serveur",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["serve"],
+      "port": 3211
     }
   ]
 }

@@ -5,10 +5,12 @@
  * multiplié par la vitesse choisie et exécute le nombre de pas de 1 s correspondant.
  * L'interface ne lit que l'image du camp du joueur (`picture`) et ses événements visibles.
  */
-import { getSidePicture, visibleEvents, type SideId, type SidePicture, type SimEvent } from '@warcommand/simulation-core';
-import { estimateMission, nightNow, validateOrder, type MissionEstimate, type Order, type OrderResult } from '@warcommand/air-operations';
-import { createSession, issueOrder, stepSession, type Scenario, type Session, type SetupOptions } from '@warcommand/scenario-system';
+import { destination, getSidePicture, visibleEvents, type Bounds, type LatLon, type SideId, type SidePicture, type SimEvent } from '@warcommand/simulation-core';
+import { estimateMission, nightNow, type MissionEstimate } from '@warcommand/air-operations';
+import { createSession, issueOrder, stepSession, validateGameOrder, type GameOrder, type GameOrderResult, type Scenario, type Session, type SetupOptions } from '@warcommand/scenario-system';
 import { loadGame, saveGame, type SaveGame } from '@warcommand/replay-engine';
+import type { Players } from '@warcommand/net-play';
+import { boundsOf, groundFrame } from '../world-map/scene';
 
 export type Speed = 0 | 1 | 5 | 20 | 100;
 export const SPEEDS: readonly Speed[] = [0, 1, 5, 20, 100];
@@ -25,9 +27,92 @@ export interface StoredSave {
   save: SaveGame;
 }
 
-export class GameController {
+/** Ce que l'écran de jeu sait du scénario : le titre, le briefing de son camp, le cadrage de départ. */
+export interface GameBrief {
+  scenarioId: string;
+  title: string;
+  description: string;
+  /** Briefing du camp du joueur. */
+  briefing: string;
+  region: { center: LatLon; zoom: number };
+  /** Emprise à cadrer à l'ouverture. */
+  fit: Bounds | undefined;
+}
+
+/** Partie à deux joueurs : état de la table, tel que le serveur le donne. */
+export interface NetStatus {
+  code: string;
+  players: Players;
+  /** Vitesse demandée par chaque joueur ; la partie avance à la plus lente. */
+  requested: Record<SideId, number>;
+  /** Vitesse effective de la simulation. */
+  effective: number;
+  /** La liaison avec le serveur est-elle établie ? */
+  online: boolean;
+  /** Dernier message d'erreur du serveur, à montrer au joueur. */
+  error: string | null;
+}
+
+/**
+ * Ce dont l'écran de jeu a besoin, que la simulation tourne ici (partie solitaire) ou sur un serveur
+ * (partie à deux joueurs). Dans les deux cas l'écran ne lit que l'image du camp du joueur.
+ */
+export interface GameLink {
+  readonly playerSide: SideId;
+  readonly brief: GameBrief;
+  /** Vitesse choisie par le joueur (en réseau : celle qu'il demande). */
+  readonly speed: Speed;
+  readonly time: number;
+  readonly ended: boolean;
+  readonly wegoTurnS: number;
+  readonly planning: boolean;
+  /** Avance manuelle et sauvegarde : possibles seulement quand la simulation tourne ici. */
+  readonly canStep: boolean;
+  readonly canSave: boolean;
+  subscribe: (listener: () => void) => () => void;
+  getVersion: () => number;
+  start(): void;
+  stop(): void;
+  setSpeed(speed: Speed): void;
+  advance(seconds: number): void;
+  night(): boolean;
+  estimate(order: GameOrder): MissionEstimate | null;
+  check(order: GameOrder): GameOrderResult;
+  order(order: GameOrder): Promise<GameOrderResult>;
+  picture(): SidePicture;
+  events(): SimEvent[];
+  save(): SaveGame | null;
+  /** Partie complète, vérité-terrain comprise : disponible une fois la mission terminée. */
+  finalSession(): Session | null;
+  /** État de la table en partie à deux joueurs ; `null` en partie solitaire. */
+  net(): NetStatus | null;
+}
+
+/** Cadrage initial : les bases, les unités et le secteur d'objectif (information de briefing). */
+export function briefingFit(objective: { kind: 'air' | 'ground'; center: LatLon; radiusKm: number }, points: readonly LatLon[]): Bounds | undefined {
+  // Pour un objectif terrestre, le champ de bataille est petit devant le théâtre : on cadre sur ses abords.
+  if (objective.kind === 'ground') return groundFrame(objective.center);
+  const edge = (bearing: number) => destination(objective.center, bearing, objective.radiusKm);
+  return boundsOf([...points, edge(0), edge(90), edge(180), edge(270)]);
+}
+
+function briefOf(scenario: Scenario, side: SideId): GameBrief {
+  return {
+    scenarioId: scenario.id,
+    title: scenario.title,
+    description: scenario.description,
+    briefing: scenario.sides[side].briefing,
+    region: { center: scenario.region.center, zoom: scenario.region.zoom },
+    fit: briefingFit(scenario.objective, [...scenario.bases.map((b) => b.pos), ...scenario.units.flatMap((u) => (u.pos ? [u.pos] : u.airborne ? [u.airborne.pos] : []))]),
+  };
+}
+
+export class GameController implements GameLink {
   readonly session: Session;
   readonly playerSide: SideId;
+  readonly brief: GameBrief;
+  readonly canStep = true;
+  readonly canSave = true;
   speed: Speed = 0;
   /** Incrémenté à chaque changement visible : sert de version pour React. */
   version = 0;
@@ -44,6 +129,7 @@ export class GameController {
     if (session.options.playerSide === null) throw new Error('Une partie jouée exige un camp pour le joueur');
     this.session = session;
     this.playerSide = session.options.playerSide;
+    this.brief = briefOf(session.scenario, this.playerSide);
   }
 
   static create(scenario: Scenario, options: Partial<SetupOptions>): GameController {
@@ -126,22 +212,31 @@ export class GameController {
   }
 
   /** Estimation d'une mission avant de l'ordonner : transit, carburant à l'arrivée, autonomie sur zone. */
-  estimate(order: Order): MissionEstimate | null {
+  estimate(order: GameOrder): MissionEstimate | null {
     if (order.type !== 'CREATE_MISSION' || order.side !== this.playerSide) return null;
     return estimateMission(this.session.state, this.playerSide, order.draft);
   }
 
   /** Vérifie un ordre sans l'émettre (retour immédiat dans le planificateur). */
-  check(order: Order): OrderResult {
+  check(order: GameOrder): GameOrderResult {
     if (order.side !== this.playerSide) return { ok: false, code: 'WRONG_SIDE' };
     if (!this.planning) return { ok: false, code: 'NOT_PLANNING_PHASE' };
-    return validateOrder(this.session.state, order);
+    return validateGameOrder(this.session.state, order);
   }
 
-  order(order: Order): OrderResult {
+  /** Ordre du joueur, toutes composantes confondues. */
+  order(order: GameOrder): Promise<GameOrderResult> {
     const result = issueOrder(this.session, order);
     this.notify();
-    return result;
+    return Promise.resolve(result);
+  }
+
+  finalSession(): Session | null {
+    return this.ended ? this.session : null;
+  }
+
+  net(): NetStatus | null {
+    return null;
   }
 
   get ended(): boolean {

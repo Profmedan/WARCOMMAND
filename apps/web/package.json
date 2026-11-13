@@ -14,11 +14,13 @@
   "dependencies": {
     "@warcommand/ai-commander": "workspace:*",
     "@warcommand/air-operations": "workspace:*",
+    "@warcommand/campaign-system": "workspace:*",
     "@warcommand/doctrine-engine": "workspace:*",
     "@warcommand/land-operations": "workspace:*",
     "@warcommand/mission-editor": "workspace:*",
     "@warcommand/multi-domain-effects": "workspace:*",
     "@warcommand/naval-operations": "workspace:*",
+    "@warcommand/net-play": "workspace:*",
     "@warcommand/replay-engine": "workspace:*",
     "@warcommand/scenario-system": "workspace:*",
     "@warcommand/simulation-core": "workspace:*",

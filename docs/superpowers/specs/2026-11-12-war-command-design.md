@@ -1,7 +1,8 @@
 # WAR COMMAND — Dossier de conception (phase 1) et tranche verticale (phase 2)
 
 - Date : 12 novembre 2026
-- Statut : conception validée par le prompt maître ; tranche verticale en cours d'implémentation
+- Statut : phases 1 à 6 réalisées (bilans des phases 3 à 6 aux §9 à §12) ; les sections 1 à 8 décrivent la
+  conception d'origine et la tranche verticale
 - Portée de ce document : les huit livrables demandés par la « méthode de travail » (§21 du prompt maître)
 - Document compagnon : [`docs/modele-de-jeu.md`](../../modele-de-jeu.md) — règles, probabilités et simplifications du moteur
 
@@ -73,9 +74,10 @@ reproductible.*
 | MapLibre GL JS | 6.18 | Carte opérationnelle 2D | BSD-3-Clause |
 | world-atlas + topojson-client | 2.0 / 3.1 | Fond de carte Natural Earth embarqué | ISC ; données domaine public |
 
-Reportés (aucune dépendance installée tant qu'aucune fonction ne les utilise) : PostgreSQL (campagnes
-persistantes, phase 6), WebSocket (multijoueur, phase 6), CesiumJS (globe 3D, phase 6), Playwright (tests de
-bout en bout, phase 3). Aucune API payante, aucun service d'IA externe.
+Ajouté en phase 6 : `ws` 8.23 (MIT), serveur WebSocket de la partie à deux joueurs. Envisagés par le
+prompt maître et **non retenus** (§12) : CesiumJS — MapLibre, déjà présent, affiche le globe ; PostgreSQL —
+aucune fonction du jeu n'a besoin d'une base de données. Toujours reporté : Playwright (tests de bout en
+bout de l'écran). Aucune API payante, aucun service d'IA externe.
 
 ### 2.2 Modules
 
@@ -115,10 +117,15 @@ simulation-core ◄── unit-database
 `mission-editor` a été créé en phase 4 (§10) ; il dépend de `scenario-system` et n'est importé que par
 l'application et l'outil sans navigateur.
 
-Modules du prompt maître **non créés** à ce stade, et pourquoi : `land-operations`, `naval-operations`,
-`multi-domain-effects`. Le bâtiment naval et les groupes sol-air de la tranche sont des
-plates-formes capteur + sol-air ; leur logique vit provisoirement dans `air-operations` et sera extraite en
-phase 5. Les types d'état prévoient déjà les domaines `air`, `surface`, `ground`.
+`campaign-system` et `net-play` ont été créés en phase 6 (§12) : le premier dépend de `scenario-system` et
+de `mission-editor`, le second de `scenario-system` et de `replay-engine`. Aucun des deux ne connaît le
+navigateur ; le transport WebSocket et son minuteur sont dans `tools/`.
+
+`land-operations`, `naval-operations` et `multi-domain-effects` ont été créés en phase 5 (§11). Ils
+dépendent de `simulation-core` et de `air-operations` (observation, tirs, destruction d'unité) ;
+`ai-commander` et `scenario-system` en dépendent. Le sol-air et le déplacement des bâtiments, écrits dès la
+tranche verticale, sont restés dans `air-operations` : les extraire aurait déplacé du code éprouvé sans
+rien changer au jeu.
 
 ### 2.3 Principes structurants
 
@@ -268,7 +275,7 @@ Phase 1 et 2 (ce lot) :
 10. Vérification réelle dans le navigateur, puis documentation des limites.
 
 Phases 3 (simulation aérienne approfondie) et 4 (éditeur de missions) : réalisées, voir §9 et §10.
-Phases suivantes (non commencées) : 5 interarmées ; 6 fonctions avancées.
+Phases 5 (interarmées) et 6 (fonctions avancées) : réalisées, voir §11 et §12.
 
 ---
 
@@ -403,3 +410,142 @@ bout en bout automatisés de l'écran.
 | Import et export | Aller-retour à l'identique ; brouillon incomplet accepté ; fichier illisible, sauvegarde de partie, autre version, forme incorrecte refusés | Tests dédiés |
 | Sans navigateur | Scénario livré exporté puis rejoué par `pnpm sim --file` | Même empreinte d'état que l'original |
 
+
+## 11. Phase 5 — Interarmées (réalisée le 13/11/2026)
+
+Le prompt maître définit la phase 5 par six thèmes (§19) et les détaille aux §6, §7 et §8.
+
+| Thème du prompt | Réalisation |
+|-----------------|-------------|
+| Forces terrestres | Huit types de formation ; effectifs, moral, fatigue, cohésion, ravitaillement, retranchement ; cinq postures ; terrain, zones de contrôle, rupture et ralliement ; combat par attrition, appui d'artillerie ; demande et réception d'un appui aérien rapproché (neuvième mission aérienne) |
+| Forces navales | Porte-avions et aviation embarquée, frégates, destroyers, sous-marins, navires amphibies et logistiques ; groupes et escortes ; écoute sous-marine, missiles antinavires, torpilles, lutte anti-sous-marine, défense rapprochée, avaries ; débarquement ; recomplètement à la mer |
+| Logistique | Dépôts à terre et flottants, bataillons logistiques en navette, consommation selon l'activité, effets du manque de ravitaillement |
+| Commandement | Délai de transmission des ordres selon la doctrine, l'état des réseaux et la proximité d'un poste de commandement ; effets d'une formation hors commandement |
+| Effets cyber et spatiaux abstraits | Trois services par camp (réseaux, liaisons, navigation), perturbation temporaire, résilience, rétablissement ; satellites d'observation fictifs à fenêtres de couverture |
+| Opérations spéciales | Équipes spécialisées : infiltration, observation, comptes rendus de renseignement, découverte, exfiltration, résolution abstraite |
+
+Troisième scénario livré : **« Tête de pont »** (est de l'Islande, 210 min), qui réunit toutes ces
+composantes dans les deux camps. Situation, bases et unités fictives ; aucune position réelle de forces.
+
+### Décisions prises par l'implémenteur
+
+| # | Décision | Raison |
+|---|----------|--------|
+| D31 | Trois **paquets** nouveaux, chacun avec ses ordres et son système ; l'ordre de résolution devient air → terre → mer → effets → objectif → déclencheurs → IA | Noms imposés par le prompt (§15) ; séparation règles / IA / affichage conservée |
+| D32 | Les nouveaux systèmes **ne font rien et ne tirent aucun nombre aléatoire** dans un scénario sans ces composantes | Les deux scénarios aériens et leurs campagnes de mesure se rejouent à l'identique (vérifié) |
+| D33 | **Masque terre-mer** tiré de Natural Earth 1:50 000 000 (`world-atlas`, déjà présent pour la carte) : formations à terre, bâtiments en mer, itinéraires contrôlés segment par segment, sans recherche de chemin | Aucune dépendance nouvelle ; un refus motivé vaut mieux qu'un chemin deviné |
+| D34 | Combat terrestre **abstrait** : une formation est un point, les pertes sont une attrition proportionnelle à la puissance reçue ; la puissance s'exprime en « équivalent bataillon d'infanterie » | Demandé « abstrait » par le prompt ; des valeurs relatives n'affirment rien sur des matériels réels |
+| D35 | Formations et bâtiments sont des **matériels génériques**, sans équivalent réel, aux valeurs toutes étiquetées « estimation » | Exigence « pas de données techniques inventées » |
+| D36 | **Objectif terrestre** : la zone revient au camp dont les formations de mêlée présentes pèsent 1,5 fois l'adversaire ; la simple présence ne suffit pas | Avec la seule présence, la zone restait « contestée » toute la partie |
+| D37 | Estimation du contrôle : une formation perdue de vue reste **présumée sur place dix minutes** | Constaté en jouant : sans cette mémoire, l'estimation basculait à chaque observation manquée et le joueur croyait tenir une zone disputée |
+| D38 | Cyber et espace : des **niveaux de service** et des **jetons** accordés par le scénario, aux effets temporaires sur les délais d'ordre, la précision des tirs guidés et la transmission du renseignement | Le prompt exclut toute fonction d'attaque informatique réelle ; le modèle ne décrit aucun système ni aucune technique |
+| D39 | Une base peut être **portée par un bâtiment** (pont d'envol, dépôt flottant) : elle le suit, ferme s'il est avarié, disparaît s'il coule | Réutilise tout le modèle des bases (stocks, remise en condition, déroutement) sans cas particulier |
+| D40 | L'IA interarmées est un **module à part** (`joint.ts`) qui rend des ordres ; elle réserve une paire de chasseurs à l'appui aérien avant que l'IA aérienne ne répartisse le reste | Constaté : sans réserve, l'IA aérienne engageait tous ses chasseurs et l'appui ne partait jamais |
+| D41 | L'IA ne fait chasser son **sous-marin** qu'au niveau vétéran et ne manœuvre pas ses bâtiments de surface pour combattre | Choix de périmètre ; dit dans les limites — en difficulté standard, le combat naval vient du joueur |
+| D42 | Format de **sauvegarde** porté à la version 2 ; une sauvegarde antérieure est refusée avec un message clair. Le format de **scénario** reste en version 1, avec des champs facultatifs | L'état a changé de forme ; les scénarios personnels de la phase 4 restent lisibles |
+| D43 | **Éditeur** : toutes les composantes interarmées s'y règlent ; un porte-avions arrive avec son pont, un navire logistique avec son dépôt ; un onglet « Terrain » porte zones de terrain et satellites | Un scénario interarmées doit pouvoir être écrit sans toucher au JSON |
+| D44 | Le réglage d'**entraînement** n'est plus proposé pour une formation terrestre ou une équipe spéciale | Il ne pèse que sur le tir des missiles : ailleurs, le curseur aurait été décoratif |
+
+### Défauts trouvés en vérifiant, et corrigés
+
+Escorte incapable de rejoindre son poste (le chef de file règle désormais son allure) ; unités de
+reconnaissance de l'IA recevant des dizaines d'ordres contradictoires (axe stable, hystérésis) ; objectif
+terrestre toujours contesté (D36) ; appui aérien jamais lancé par l'IA (D40) ; scénario déséquilibré dans
+les deux sens avant réglage ; estimation du contrôle instable (D37) ; équipes spéciales rattachées à une
+base trop lointaine pour arriver à temps ; compte rendu muet sur les pertes terrestres et navales ;
+libellés de refus et accords du journal.
+
+### Reporté
+
+Recherche de chemin et réseau routier ; manœuvre offensive des bâtiments de surface par l'IA ; hélicoptères,
+défense sol-air d'accompagnement, mines, frappe d'objectifs fixes, lutte antinavire aérienne dédiée ;
+relief cartographié ; satellites radar ; plusieurs objectifs ; tests de bout en bout automatisés de l'écran.
+
+### Matrice de tests ajoutée
+
+| Domaine | Test | Critère |
+|---------|------|---------|
+| Masque terre-mer | Points à terre et en mer, antiméridien, trajets à terre et en mer, première côte | Tests dédiés |
+| Bibliothèque | Fiches interarmées : valeurs toutes étiquetées, statistiques propres à chaque type | Tests dédiés |
+| Mise en place | États terrestre, naval et spécial ; troupes embarquées ; bases portées ; services, effets, satellites ; refus du schéma (terre et mer, capacité, pont, escorte, fenêtre) | 13 tests |
+| Ordres terrestres | Validation, délai de transmission, commandement, postures, itinéraire à terre | 11 tests |
+| Session | Ordres de tous les paquets acheminés par la même porte, refus motivés, enregistrement et rejeu | 5 tests |
+| Combat terrestre | Contact, attrition, terrain, retranchement, artillerie, logistique, rupture et ralliement, contrôle par rapport de forces, estimation et mémoire des pistes, invariants | 22 tests |
+| Appui aérien | Demande, choix de cible, effets, terrain, navigation dégradée, constat | 8 tests |
+| Naval | Escorte, base portée, déroutement, sonar, missiles antinavires et défense rapprochée, torpilles, lutte anti-sous-marine, avaries, débarquement, recomplètement | 19 tests |
+| Effets et opérations spéciales | Jetons, durée selon la résilience, rétablissement, conséquences, satellites, infiltration, découverte, exfiltration, renseignement | 15 tests |
+| IA interarmées | Attaque, défense, réserve d'appui, effets, équipe spéciale, débarquement, sous-marin, aucun ordre refusé | 10 tests |
+| Scénario « Tête de pont » | Validité, composantes, géographie, partie complète sous invariants, reproductibilité, aucune fuite d'identifiant adverse | 7 tests |
+| Compte rendu | Effectifs restants, coque, phase des équipes | 3 tests |
+| Éditeur | Formations, bâtiments, escortes, embarquement, pont d'envol, dépôt flottant, équipes, dépôts, effets, objectif terrestre, terrain, satellites, brouillon complet joué au test rapide | 37 tests |
+| Non-régression | Campagnes de 60 et 30 parties des deux premiers scénarios | Résultats identiques à ceux de la phase 4 |
+
+
+## 12. Phase 6 — Fonctions avancées (réalisée le 13/11/2026)
+
+Le prompt maître définit la phase 6 par cinq thèmes (§19).
+
+| Thème du prompt | Réalisation |
+|-----------------|-------------|
+| Globe 3D | Vue 3D de la carte, en partie comme en rejeu : Terre sphérique, caméra libre, altitude des aéronefs et des pistes aériennes en volume, profil de vol des traces, terrain du scénario en volumes schématiques |
+| Replay détaillé | Consultation à tout instant, lecture à trois vitesses, pas à pas, chronologie à repères cliquables, traces des unités, point de vue de l'arbitre ou d'un camp, fiche d'une unité à l'instant observé, relecture d'un enregistrement exporté |
+| Campagnes persistantes | « Opération Vent du Nord » : trois actes enchaînés selon leur issue ; report des pertes d'aéronefs, des stocks de munitions et de l'expérience ; points ; enregistrement après chaque mission, suspension d'une mission, import et export |
+| Multijoueur | Partie à deux joueurs : serveur de parties faisant autorité, WebSocket, brouillard de guerre préservé, temps continu ou par tours, reprise après déconnexion, compte rendu commun |
+| Analyse approfondie des opérations | Séries temporelles du rapport de forces et de la qualité de l'image, efficacité des tirs et part de chance, distance de tir et surprise, chaîne d'engagement, bilan des missions, moments clés, sensibilité au hasard par rejeux ; aussi sans navigateur |
+
+### Décisions prises par l'implémenteur
+
+| # | Décision | Raison |
+|---|----------|--------|
+| D45 | **Globe 3D avec MapLibre**, sans CesiumJS | MapLibre 6, déjà installé, a une projection « globe », l'inclinaison et l'extrusion : une seconde bibliothèque de carte aurait dupliqué symboles, couches et interactions. Exigence « pas de dépendances non nécessaires » |
+| D46 | La vue 3D est **une autre vue de la même scène** : aucune règle, aucune donnée nouvelle | Le prompt demande que la 3D ne bloque jamais la simulation ; la scène 2D porte déjà positions et altitudes |
+| D47 | **Pas de relief réel** : les zones de terrain du scénario sont des volumes de hauteur conventionnelle, et c'est écrit sur la carte | Aucun modèle d'altitude n'est embarqué (D3) ; un relief en ligne aurait ajouté une dépendance réseau et une licence à vérifier. Présenter des volumes comme du relief aurait été une fonction fictive |
+| D48 | Altitudes **exagérées douze fois** ; les symboles restent au sol, au pied de leur colonne | À l'échelle d'un théâtre de 600 km, 9 000 m sont invisibles. MapLibre ne place pas d'élément d'interface en altitude sans couche personnalisée : la colonne dit l'altitude, le symbole reste cliquable |
+| D49 | L'analyse **re-simule** l'enregistrement et ne stocke rien pendant la partie | Même principe que le rejeu : la partie tient dans sa graine et ses ordres. Aucune mesure ne peut diverger de ce qui s'est joué |
+| D50 | Chaque tir résolu porte ses **faits** (camp, distance, portée, alerte de la cible, coup au but), visibles du seul arbitre | L'analyse a besoin du camp et des conditions du tir ; l'événement n'étant pas visible des camps, il peut porter des identifiants de vérité-terrain sans rien révéler |
+| D51 | La « part du hasard » rejoue **les mêmes ordres aux mêmes instants** avec d'autres graines, et le dit | Mesure simple et reproductible de la robustesse d'un plan. Sa limite — des ordres qui ne s'adaptent pas — est annoncée à côté du résultat |
+| D52 | Le rejeu propose **le point de vue d'un camp**, par la même fonction que celle qui sert l'IA et l'écran de jeu | Voir ce que l'adversaire savait est la leçon la plus utile d'une partie ; aucune seconde logique de brouillard à maintenir |
+| D53 | Un enregistrement relu est **revalidé pour le scénario, contrôlé en forme pour les ordres** ; un ordre illisible est refusé au rejeu sans l'interrompre | Le moteur est le seul juge d'un ordre ; un fichier altéré ne doit ni planter le jeu ni être deviné |
+| D54 | Campagne = **données + fonctions pures** (`campaign-system`) ; le stockage est une affaire d'interface | Même séparation règles / persistance que le reste ; tout se teste sans navigateur |
+| D55 | Les reports **modifient le scénario** de la mission suivante par les opérations de l'éditeur, puis le font revérifier par le moteur | Pas de second chemin vers l'état initial : une mission de campagne est un scénario comme un autre, rejouable et enregistrable tel quel |
+| D56 | Reports limités aux **aéronefs, missiles et équipages**, avec des valeurs d'équilibrage (classe 4) | Ce sont les grandeurs communes aux trois scénarios. Une dotation n'est jamais amputée de plus de la moitié : une mission doit rester jouable |
+| D57 | Persistance : **stockage local et fichiers JSON validés par schéma**, sans PostgreSQL | Un jeu solitaire dans un navigateur n'a pas de serveur de données ; l'imposer aurait rendu l'installation plus lourde sans rien apporter. Un état de campagne relu est revalidé (forme, version, campagne et mission connues) |
+| D58 | Multijoueur : **simulation autoritaire sur un serveur**, les clients n'ont jamais l'état | Annoncé au §6 (déterminisme entre plates-formes) et seul moyen de garder le brouillard de guerre entre deux humains |
+| D59 | Le salon (`net-play`) est **sans socket ni horloge** : il reçoit messages et durées, rend des messages | Tout le protocole se teste de façon déterministe ; le serveur n'est qu'un adaptateur d'une centaine de lignes, essayé à part avec de vraies connexions |
+| D60 | Chaque joueur reçoit **l'image de son camp**, ses événements et les fiches de ses seuls matériels ; la vérité-terrain n'est envoyée qu'à la fin | Même contrat que l'IA. Les fiches adverses sont retirées : leur liste aurait révélé la dotation ennemie |
+| D61 | Le temps avance à **la plus lente des deux vitesses demandées** ; il s'arrête si un joueur manque | Règle sans arbitre : chacun peut mettre en pause, personne ne peut accélérer seul |
+| D62 | Le planificateur d'un joueur **interroge le serveur** (faisabilité, estimation) au lieu de valider localement | Le client n'a pas l'état : toute validation locale aurait été une seconde logique, ou une fuite |
+| D63 | L'écran de jeu dépend d'une **interface commune** (`GameLink`) à la partie locale et à la partie en réseau | Un seul écran, deux sources ; la sauvegarde, l'avance manuelle et « rejouer » disparaissent là où ils n'ont pas de sens, au lieu de rester inactifs |
+| D64 | Serveur en écoute sur **cette seule machine** par défaut ; `--lan` l'ouvre au réseau local. Taille des messages, débit et nombre de connexions bornés | Pas de chiffrement ni de comptes : ce n'est pas un service Internet, et c'est dit dans les limites |
+| D65 | Le script s'appelle `pnpm serve` | `pnpm server` est une commande interne de pnpm : elle masquait le script sans rien lancer (constaté à l'essai) |
+| D66 | Phase 6 développée **test d'abord** pour toute la logique ; écrans vérifiés à la main, graphiques soumis à un contrôle de palette | Les teintes des camps de l'interface sortaient de la bande de clarté conseillée sur fond sombre : les tracés utilisent des teintes assombries d'un cran, contrôlées |
+
+### Défauts trouvés en vérifiant, et corrigés
+
+Le test du temps sur zone supposait qu'une patrouille atteint toujours sa station : dans la partie d'essai
+elle passait du transit à la poursuite (test corrigé, la mesure est documentée) ; `pnpm server` ne lançait
+rien (D65) ; la légende de la vue 3D recouvrait le crédit de la carte ; les teintes des courbes (D66) ;
+une ligne du README collée à la précédente.
+
+### Reporté
+
+Relief réel et couches cartographiques en ligne ; symboles placés en altitude ; éditeur de campagne et
+campagnes à embranchements plus riches ; report des formations terrestres et des bâtiments ; plus de deux
+joueurs, spectateurs, IA d'appoint en réseau, sauvegarde d'une partie en réseau, chiffrement et comptes ;
+conservation des parties sur le serveur ; analyse comparée de plusieurs parties ; tests de bout en bout
+automatisés de l'écran.
+
+### Matrice de tests ajoutée
+
+| Domaine | Test | Critère |
+|---------|------|---------|
+| Faits de tir | Numéro, camp, distance, portée, alerte, coup au but sur chaque tir résolu ; total par camp égal au bilan | 2 tests |
+| Analyse | Séries (début, fin, état final, bornes, reproductibilité), engagements, distances et surprise, chaîne d'engagement, missions, moments clés, composantes interarmées | 13 tests |
+| Sensibilité | Graine d'origine redonne le résultat d'origine ; graines distinctes et stables ; résumé | 3 tests |
+| Rejeu détaillé | État identique à la re-simulation directe en avant, en arrière et pas à pas ; états rendus jamais modifiés ; journal ; traces | 6 tests |
+| Enregistrement | Aller-retour à l'identique ; dix refus motivés ; ordre illisible refusé au rejeu sans l'interrompre | 12 tests |
+| Deux joueurs (moteur) | Aucune IA, ordres des deux camps consignés, partie ordinaire inchangée, partie complète sans décision d'IA | 5 tests |
+| Campagne | Cohérence de la campagne livrée, début, consignation d'une mission réellement jouée, points, refus, enchaînement, fin, reports (aéronefs, plancher, munitions, expérience), persistance et sept refus, campagne complète rejouée à l'identique | 27 tests |
+| Salon | Création, arrivée, dix refus, scénario personnel, vitesse la plus lente, mode par tours, ordres et vérification, déconnexion, reprise, fermeture, brouillard de guerre sur une partie entière, sauvegarde finale rejouée à l'identique | 27 tests |
+| Serveur | Vraies connexions WebSocket : état de santé, partie à deux, message illisible, message démesuré, inondation | 5 tests |
+| Non-régression | Campagnes de mesure des trois scénarios | Résultats identiques à ceux de la phase 5 |
